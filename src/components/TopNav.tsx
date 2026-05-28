@@ -7,13 +7,8 @@ import { StatusStrip } from "./StatusStrip";
 type Item = { href: string; label: string; badge?: string };
 
 const ITEMS: Item[] = [
-  { href: "/",            label: "Image" },
-  { href: "/video",       label: "Video" },
-  { href: "/batch-edit",  label: "Batch edit" },
-  { href: "/translate",   label: "Translate" },
-  { href: "/avatar",      label: "Avatar" },
-  { href: "/upscale",     label: "Upscale" },
-  { href: "/history",     label: "History" },
+  { href: "/",      label: "Image" },
+  { href: "/video", label: "Video" },
 ];
 
 export function TopNav() {

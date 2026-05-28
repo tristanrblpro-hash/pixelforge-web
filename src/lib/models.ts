@@ -48,12 +48,15 @@ export type UpscaleModel = {
   pricePerSecond?: number;
 };
 
+// IDs validated against KIE.ai live API on 2026-05-28.
+// Others are commented out — confirm their exact IDs at https://kie.ai/market
+// then add them back.
 export const IMAGE_MODELS: Record<string, ImageModel> = {
   "nano-banana-pro": {
     label: "Nano Banana Pro",
     vendor: "Google (Gemini 3 Pro Image)",
-    kieModelT2I: "google/nano-banana-pro",
-    kieModelI2I: "google/nano-banana-pro",
+    kieModelT2I: "nano-banana-pro",
+    kieModelI2I: "nano-banana-pro",
     supports: ["t2i", "i2i"],
     aspectRatios: ["1:1", "9:16", "16:9", "4:3", "3:4", "3:2", "2:3"],
     resolutions: ["1024x1024", "1024x1792", "1792x1024"],
@@ -61,41 +64,17 @@ export const IMAGE_MODELS: Record<string, ImageModel> = {
     maxInputImages: 3,
     notes: "In-image text rendering, product fidelity, editorial style.",
   },
-  "gpt-image-2": {
-    label: "GPT Image 2",
-    vendor: "OpenAI",
-    kieModelT2I: "openai/gpt-image-2-text-to-image",
-    kieModelI2I: "openai/gpt-image-2-image-to-image",
-    supports: ["t2i", "i2i", "edit"],
-    aspectRatios: ["1:1", "9:16", "16:9"],
-    resolutions: ["1024x1024", "1024x1792", "1792x1024"],
-    pricePerImage: 0.19,
-    maxInputImages: 4,
-    notes: "Best for fine-grained edits and batch-edit pipelines.",
-  },
-  "flux-pro-1-1": {
-    label: "Flux Pro 1.1",
-    vendor: "Black Forest Labs",
-    kieModelT2I: "bfl/flux-pro-1-1",
-    kieModelI2I: null,
-    supports: ["t2i"],
+  "nano-banana": {
+    label: "Nano Banana",
+    vendor: "Google (Gemini 2.x Image)",
+    kieModelT2I: "google/nano-banana",
+    kieModelI2I: "google/nano-banana",
+    supports: ["t2i", "i2i"],
     aspectRatios: ["1:1", "9:16", "16:9", "4:3", "3:4"],
     resolutions: ["1024x1024", "1024x1792", "1792x1024"],
-    pricePerImage: 0.04,
-    maxInputImages: 0,
-    notes: "Fast, cheap, photorealistic.",
-  },
-  "ideogram-v3": {
-    label: "Ideogram v3",
-    vendor: "Ideogram",
-    kieModelT2I: "ideogram/v3",
-    kieModelI2I: null,
-    supports: ["t2i"],
-    aspectRatios: ["1:1", "9:16", "16:9", "4:3", "3:4"],
-    resolutions: ["1024x1024", "1024x1792", "1792x1024"],
-    pricePerImage: 0.06,
-    maxInputImages: 0,
-    notes: "Strong typography & poster layouts.",
+    pricePerImage: 0.039,
+    maxInputImages: 3,
+    notes: "Fast & cheap variant of Nano Banana.",
   },
 };
 

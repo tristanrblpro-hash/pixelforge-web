@@ -41,7 +41,7 @@ export function PromptBar({ models, busy, onSubmit }: Props) {
   }
 
   return (
-    <div className="fixed left-1/2 -translate-x-1/2 bottom-6 z-40 w-[min(960px,calc(100vw-280px))]">
+    <div className="fixed left-1/2 -translate-x-1/2 bottom-6 z-40 w-[min(960px,calc(100vw-48px))]">
       <div className="rounded-2xl border border-pf-border bg-pf-elev/95 backdrop-blur-md shadow-2xl">
         <textarea
           value={prompt}

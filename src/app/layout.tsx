@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { Sidebar } from "@/components/Sidebar";
+import { TopNav } from "@/components/TopNav";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "PixelForge — AI Studio",
-  description: "Local-first AI image & video studio orchestrating KIE.ai models.",
+  description: "AI image & video studio orchestrating KIE.ai models.",
 };
 
 export default function RootLayout({
@@ -25,11 +25,11 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
-      <body className="bg-pf-bg text-pf-text">
-        <div className="grid grid-cols-[240px_1fr] min-h-screen">
-          <Sidebar />
-          <main className="px-10 py-7 pb-16 max-w-[1400px]">{children}</main>
-        </div>
+      <body className="bg-pf-bg text-pf-text min-h-screen flex flex-col">
+        <TopNav />
+        <main className="flex-1 px-8 py-7 pb-48 max-w-[1600px] w-full mx-auto">
+          {children}
+        </main>
       </body>
     </html>
   );

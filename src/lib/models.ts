@@ -13,6 +13,7 @@ export type ImageModel = {
   supports: Array<"t2i" | "i2i" | "edit">;
   aspectRatios: string[];
   resolutions: string[];
+  qualities: string[]; // e.g. ["1K", "2K", "4K"] — sent to KIE as image_size
   pricePerImage: number;
   maxInputImages: number;
   notes: string;
@@ -60,6 +61,7 @@ export const IMAGE_MODELS: Record<string, ImageModel> = {
     supports: ["t2i", "i2i"],
     aspectRatios: ["1:1", "9:16", "16:9", "4:3", "3:4", "3:2", "2:3"],
     resolutions: ["1024x1024", "1024x1792", "1792x1024"],
+    qualities: ["1K", "2K", "4K"],
     pricePerImage: 0.24,
     maxInputImages: 3,
     notes: "In-image text rendering, product fidelity, editorial style.",
@@ -72,6 +74,7 @@ export const IMAGE_MODELS: Record<string, ImageModel> = {
     supports: ["t2i", "i2i"],
     aspectRatios: ["1:1", "9:16", "16:9", "4:3", "3:4"],
     resolutions: ["1024x1024", "1024x1792", "1792x1024"],
+    qualities: ["1K", "2K"],
     pricePerImage: 0.039,
     maxInputImages: 3,
     notes: "Fast & cheap variant of Nano Banana.",

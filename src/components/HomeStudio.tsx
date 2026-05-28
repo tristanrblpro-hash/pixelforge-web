@@ -9,6 +9,7 @@ type ImageModelInfo = {
   label: string;
   vendor: string;
   aspectRatios: string[];
+  qualities: string[];
   pricePerImage: number;
 };
 
@@ -22,6 +23,7 @@ type ActiveBatch = {
   prompt: string;
   modelKey: string;
   aspectRatio: string;
+  quality: string;
   itemIds: string[]; // pre-allocated item placeholders before first poll
 };
 
@@ -99,6 +101,7 @@ export function HomeStudio({ models, initialItems }: Props) {
       prompt: string;
       modelKey: string;
       aspectRatio: string;
+      quality: string;
       count: number;
     }) => {
       setBusy(true);
@@ -137,6 +140,7 @@ export function HomeStudio({ models, initialItems }: Props) {
           prompt: input.prompt,
           modelKey: input.modelKey,
           aspectRatio: input.aspectRatio,
+          quality: input.quality,
           itemIds: [],
         };
         setActive((prev) => [...prev, ctx]);

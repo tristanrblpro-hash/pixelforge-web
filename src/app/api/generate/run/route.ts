@@ -11,6 +11,7 @@ type Body = {
   prompt?: string;
   modelKey?: string;
   aspectRatio?: string;
+  quality?: string;
   count?: number;
 };
 
@@ -34,6 +35,7 @@ export async function POST(req: NextRequest) {
   const prompt = (body.prompt || "").trim();
   const modelKey = body.modelKey || "nano-banana-pro";
   const aspectRatio = body.aspectRatio || "1:1";
+  const quality = body.quality || "1K";
   const count = Math.max(1, Math.min(20, Number(body.count) || 1));
 
   if (!prompt) {
@@ -52,7 +54,7 @@ export async function POST(req: NextRequest) {
   const supabase = createSupabaseAdminClient();
 
   // 1. Persist the batch row first so /status can find it even if all submits fail.
-  const meta = { prompt, modelKey, aspectRatio, count };
+  const meta = { prompt, modelKey, aspectRatio, quality, count };
   const estimatedCost = model.pricePerImage * count;
   const { error: batchErr } = await supabase.from("batches").insert({
     batch_id: batchId,
@@ -76,6 +78,7 @@ export async function POST(req: NextRequest) {
       const taskId = await submitTask(model.kieModelT2I, {
         prompt,
         aspect_ratio: aspectRatio,
+        image_size: quality, // KIE accepts "1K" / "2K" / "4K" — adjust if validation fails
       });
       return { itemId, idx, taskId };
     }),

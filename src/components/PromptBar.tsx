@@ -8,6 +8,7 @@ type ImageModelInfo = {
   label: string;
   vendor: string;
   aspectRatios: string[];
+  qualities: string[];
   pricePerImage: number;
 };
 
@@ -18,6 +19,7 @@ type Props = {
     prompt: string;
     modelKey: string;
     aspectRatio: string;
+    quality: string;
     count: number;
   }) => void;
 };
@@ -28,16 +30,25 @@ export function PromptBar({ models, busy, onSubmit }: Props) {
   const [count, setCount] = useState(1);
   const [modelOpen, setModelOpen] = useState(false);
   const [ratioOpen, setRatioOpen] = useState(false);
+  const [qualityOpen, setQualityOpen] = useState(false);
 
   const selectedModel = models.find((m) => m.key === modelKey) || models[0];
   const ratios = selectedModel?.aspectRatios ?? ["1:1"];
+  const qualities = selectedModel?.qualities ?? ["1K"];
   const [aspectRatio, setAspectRatio] = useState(ratios[0] ?? "1:1");
+  const [quality, setQuality] = useState(qualities[0] ?? "1K");
 
   const estimatedCost = (selectedModel?.pricePerImage ?? 0) * count;
 
+  function closeAllMenus() {
+    setModelOpen(false);
+    setRatioOpen(false);
+    setQualityOpen(false);
+  }
+
   function handleGenerate() {
     if (!prompt.trim() || busy) return;
-    onSubmit({ prompt: prompt.trim(), modelKey, aspectRatio, count });
+    onSubmit({ prompt: prompt.trim(), modelKey, aspectRatio, quality, count });
   }
 
   return (
@@ -101,7 +112,7 @@ export function PromptBar({ models, busy, onSubmit }: Props) {
           <div className="relative">
             <button
               type="button"
-              onClick={() => { setRatioOpen((s) => !s); setModelOpen(false); }}
+              onClick={() => { setRatioOpen((s) => !s); setModelOpen(false); setQualityOpen(false); }}
               className="flex items-center gap-1.5 bg-pf-soft border border-pf-border rounded-full px-3 py-1.5 text-sm hover:bg-pf-bg"
             >
               <span className="text-pf-muted text-xs">▭</span>
@@ -120,6 +131,35 @@ export function PromptBar({ models, busy, onSubmit }: Props) {
                     }`}
                   >
                     {r}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Quality */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => { setQualityOpen((s) => !s); setModelOpen(false); setRatioOpen(false); }}
+              className="flex items-center gap-1.5 bg-pf-soft border border-pf-border rounded-full px-3 py-1.5 text-sm hover:bg-pf-bg"
+            >
+              <span className="text-pf-muted text-xs">✦</span>
+              <span>{quality}</span>
+              <ChevronDown size={14} className="text-pf-muted" />
+            </button>
+            {qualityOpen && (
+              <div className="absolute bottom-full mb-2 left-0 bg-pf-elev border border-pf-border rounded-lg shadow-2xl p-1 z-50 min-w-[80px]">
+                {qualities.map((q) => (
+                  <button
+                    key={q}
+                    type="button"
+                    onClick={() => { setQuality(q); setQualityOpen(false); }}
+                    className={`block w-full text-left px-3 py-1.5 rounded-md hover:bg-pf-soft text-sm ${
+                      q === quality ? "text-pf-accent" : "text-pf-text"
+                    }`}
+                  >
+                    {q}
                   </button>
                 ))}
               </div>

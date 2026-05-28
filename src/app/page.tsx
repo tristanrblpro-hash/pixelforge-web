@@ -23,6 +23,7 @@ export default async function Home() {
     label: m.label,
     vendor: m.vendor,
     aspectRatios: m.aspectRatios,
+    qualities: m.qualities,
     pricePerImage: m.pricePerImage,
   }));
 

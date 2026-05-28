@@ -3,12 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "env -u ANTHROPIC_API_KEY -u ANTHROPIC_BASE_URL next dev --webpack",
+    "build": "env -u ANTHROPIC_API_KEY -u ANTHROPIC_BASE_URL next build",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.100.0",
+    "@supabase/ssr": "^0.10.3",
+    "@supabase/supabase-js": "^2.106.2",
+    "lucide-react": "^1.17.0",
     "next": "16.2.6",
     "react": "19.2.4",
     "react-dom": "19.2.4"

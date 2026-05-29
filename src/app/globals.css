@@ -40,3 +40,39 @@ a {
 *::-webkit-scrollbar-track { background: transparent; }
 *::-webkit-scrollbar-thumb { background: var(--color-pf-border); border-radius: 4px; }
 *::-webkit-scrollbar-thumb:hover { background: #3a3a3a; }
+
+/* ------------------------------------------------------------------ */
+/* Motion primitives — used by BriefBatchWizard for step transitions, */
+/* by AttachToBriefButton for the success toast, and by the VO batch  */
+/* grid for "running" cell pulse.                                     */
+/* ------------------------------------------------------------------ */
+
+@keyframes pf-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pf-slide-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pf-pulse-dot {
+  0%, 100% { opacity: 0.4; transform: scale(0.9); }
+  50%      { opacity: 1;   transform: scale(1); }
+}
+@keyframes pf-success-pop {
+  0%   { transform: scale(0.5); opacity: 0; }
+  60%  { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.pf-fade-in    { animation: pf-fade-in    160ms ease-out both; }
+.pf-slide-up   { animation: pf-slide-up   180ms ease-out both; }
+.pf-pulse-dot  { animation: pf-pulse-dot  1.2s ease-in-out infinite; }
+.pf-success-pop{ animation: pf-success-pop 280ms cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+
+/* Respect prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  .pf-fade-in, .pf-slide-up, .pf-pulse-dot, .pf-success-pop {
+    animation: none !important;
+  }
+}

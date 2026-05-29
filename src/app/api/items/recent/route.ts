@@ -29,6 +29,7 @@ export async function GET(req: NextRequest) {
     .from("items")
     .select("item_id,batch_id,idx,status,output_url,started_at,ended_at")
     .in("batch_id", batchIds)
+    .neq("status", "cancelled")
     .order("ended_at", { ascending: false, nullsFirst: false })
     .limit(limit);
 

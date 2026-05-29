@@ -99,3 +99,96 @@ export function stripCodeFences(text: string): string {
     .replace(/\n?```\s*$/, "")
     .trim();
 }
+
+// ---------------------------------------------------------------------------
+// Multi-turn chat (used by the Prompts studio) — supports images via vision.
+// ---------------------------------------------------------------------------
+
+export type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+  // Optional list of public image URLs (e.g. Supabase Storage public links).
+  // Only meaningful on user messages — Claude reads them with vision.
+  images?: string[];
+};
+
+type ClaudeContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; source: { type: "url"; url: string } };
+
+function toApiMessage(m: ChatMessage): {
+  role: "user" | "assistant";
+  content: string | ClaudeContentBlock[];
+} {
+  if (m.role === "user" && m.images && m.images.length > 0) {
+    const blocks: ClaudeContentBlock[] = [];
+    for (const url of m.images) {
+      blocks.push({ type: "image", source: { type: "url", url } });
+    }
+    blocks.push({ type: "text", text: m.content || "Décris l'image et fais un prompt à partir de ça." });
+    return { role: m.role, content: blocks };
+  }
+  return { role: m.role, content: m.content };
+}
+
+export type ClaudeChatOptions = {
+  model: string;
+  system: string;
+  messages: ChatMessage[];
+  maxTokens?: number;
+  temperature?: number;
+  maxRetries?: number;
+};
+
+export async function claudeChat(opts: ClaudeChatOptions): Promise<ClaudeCallResult> {
+  if (!opts.messages.length) {
+    throw new Error("claudeChat requires at least one message");
+  }
+  const client = makeClient();
+  const maxRetries = opts.maxRetries ?? 4;
+  let lastErr: unknown = null;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const parts: string[] = [];
+      const stream = client.messages.stream({
+        model: opts.model,
+        max_tokens: opts.maxTokens ?? 4000,
+        temperature: opts.temperature ?? 0.6,
+        system: opts.system,
+        // The Anthropic SDK accepts content as string OR a content-block array
+        // (text + image). Cast to any to bypass the SDK's narrower input type
+        // while still using its message stream machinery.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        messages: opts.messages.map(toApiMessage) as any,
+      });
+      for await (const chunk of stream) {
+        if (chunk.type === "content_block_delta" && chunk.delta.type === "text_delta") {
+          parts.push(chunk.delta.text);
+        }
+      }
+      const final = await stream.finalMessage();
+      const inTok = final.usage.input_tokens;
+      const outTok = final.usage.output_tokens;
+      return {
+        text: parts.join("").trim(),
+        usage: {
+          inputTokens: inTok,
+          outputTokens: outTok,
+          costUsd: Number(estimateCost(opts.model, inTok, outTok).toFixed(6)),
+        },
+        model: opts.model,
+      };
+    } catch (e) {
+      lastErr = e;
+      const msg = String(e).toLowerCase();
+      const isTransient = TRANSIENT.some((k) => msg.includes(k));
+      if (attempt < maxRetries - 1 && isTransient) {
+        await new Promise((r) => setTimeout(r, BACKOFF_S[attempt] * 1000));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw new Error(`claudeChat exhausted retries: ${String(lastErr)}`);
+}

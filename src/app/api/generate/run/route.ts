@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { submitTask } from "@/lib/kie";
-import { IMAGE_MODELS } from "@/lib/models";
+import { IMAGE_MODELS, priceForQuality } from "@/lib/models";
+import { buildKieInput } from "@/lib/buildKieInput";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60; // Vercel: allow up to 60s for the fan-out
+export const maxDuration = 60;
 
 type Body = {
   prompt?: string;
@@ -13,10 +14,10 @@ type Body = {
   aspectRatio?: string;
   quality?: string;
   count?: number;
+  inputUrls?: string[];
 };
 
 function genBatchId() {
-  // gen_<timestamp36>_<rand>
   return `gen_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
@@ -37,6 +38,9 @@ export async function POST(req: NextRequest) {
   const aspectRatio = body.aspectRatio || "1:1";
   const quality = body.quality || "1K";
   const count = Math.max(1, Math.min(20, Number(body.count) || 1));
+  const inputUrls = Array.isArray(body.inputUrls)
+    ? body.inputUrls.filter((u): u is string => typeof u === "string" && u.length > 0)
+    : [];
 
   if (!prompt) {
     return NextResponse.json({ error: "Prompt is required" }, { status: 400 });
@@ -50,12 +54,22 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // If the user attached reference images but the model doesn't support i2i,
+  // reject upfront with a helpful message.
+  if (inputUrls.length > 0 && !model.kieModelI2I) {
+    return NextResponse.json(
+      {
+        error: `${model.label} does not accept reference images. Pick a model that supports i2i.`,
+      },
+      { status: 400 },
+    );
+  }
+
   const batchId = genBatchId();
   const supabase = createSupabaseAdminClient();
 
-  // 1. Persist the batch row first so /status can find it even if all submits fail.
-  const meta = { prompt, modelKey, aspectRatio, quality, count };
-  const estimatedCost = model.pricePerImage * count;
+  const meta = { prompt, modelKey, aspectRatio, quality, count, inputUrls };
+  const estimatedCost = priceForQuality(model, quality) * count;
   const { error: batchErr } = await supabase.from("batches").insert({
     batch_id: batchId,
     kind: "image_gen",
@@ -71,20 +85,18 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 2. Fan-out submits to KIE in parallel.
+  const built = buildKieInput(modelKey, { prompt, aspectRatio, quality, inputUrls });
+
   const submits = await Promise.allSettled(
     Array.from({ length: count }).map(async (_, idx) => {
       const itemId = genItemId();
-      const taskId = await submitTask(model.kieModelT2I, {
-        prompt,
-        aspect_ratio: aspectRatio,
-        image_size: quality, // KIE accepts "1K" / "2K" / "4K" — adjust if validation fails
+      const taskId = await submitTask(built.kieModelId, built.input, {
+        useVeoEndpoint: built.useVeoEndpoint,
       });
       return { itemId, idx, taskId };
     }),
   );
 
-  // 3. Persist N items, capturing both successful submits and failed ones.
   const rows = submits.map((res, idx) => {
     if (res.status === "fulfilled") {
       return {
@@ -92,7 +104,7 @@ export async function POST(req: NextRequest) {
         batch_id: batchId,
         idx,
         status: "processing",
-        input_url: null,
+        input_url: inputUrls[0] ?? null,
         output_url: null,
         error: null,
         kie_task_id: res.value.taskId,
@@ -105,7 +117,7 @@ export async function POST(req: NextRequest) {
       batch_id: batchId,
       idx,
       status: "failed",
-      input_url: null,
+      input_url: inputUrls[0] ?? null,
       output_url: null,
       error: String(res.reason).slice(0, 500),
       kie_task_id: null,

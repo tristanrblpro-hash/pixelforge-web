@@ -6,32 +6,49 @@ import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const STORAGE_BUCKET = "pixelforge-images";
+const IMAGE_BUCKET = "pixelforge-images";
+const VIDEO_BUCKET = "pixelforge-videos";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
-// Download a KIE result URL and re-upload it to Supabase Storage so we keep
-// a permanent copy beyond KIE's ~24h URL expiry. Returns the new public URL,
-// or falls back to the original KIE URL on any error so the user still sees
-// the image immediately.
+function detectMediaKind(url: string, contentType: string): { kind: "image" | "video"; ext: string } {
+  const u = url.toLowerCase();
+  const c = contentType.toLowerCase();
+  if (c.startsWith("video/") || u.includes(".mp4") || u.includes(".mov") || u.includes(".webm")) {
+    if (u.includes(".webm") || c.includes("webm")) return { kind: "video", ext: "webm" };
+    if (u.includes(".mov") || c.includes("quicktime")) return { kind: "video", ext: "mov" };
+    return { kind: "video", ext: "mp4" };
+  }
+  if (u.includes(".webp") || c.includes("webp")) return { kind: "image", ext: "webp" };
+  if (u.includes(".jpg") || u.includes(".jpeg") || c.includes("jpeg")) return { kind: "image", ext: "jpg" };
+  return { kind: "image", ext: "png" };
+}
+
+// Download a KIE result URL and re-upload it to Supabase Storage so we keep a
+// permanent copy beyond KIE's ~24h URL expiry. Falls back to the original KIE
+// URL on any failure so the user still sees the output immediately.
 async function archiveToStorage(
   supabase: ReturnType<typeof createSupabaseAdminClient>,
   kieUrl: string,
-  storagePath: string,
+  batchId: string,
+  itemId: string,
 ): Promise<string> {
   try {
     const r = await fetch(kieUrl);
     if (!r.ok) return kieUrl;
     const contentType = r.headers.get("content-type") || "image/png";
+    const { kind, ext } = detectMediaKind(kieUrl, contentType);
+    const bucket = kind === "video" ? VIDEO_BUCKET : IMAGE_BUCKET;
+    const storagePath = `${batchId}/${itemId}.${ext}`;
     const buf = Buffer.from(await r.arrayBuffer());
     const { error } = await supabase.storage
-      .from(STORAGE_BUCKET)
+      .from(bucket)
       .upload(storagePath, buf, { contentType, upsert: true });
     if (error) {
       console.error("storage upload error", error);
       return kieUrl;
     }
-    const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(storagePath);
+    const { data } = supabase.storage.from(bucket).getPublicUrl(storagePath);
     return data.publicUrl || kieUrl;
   } catch (e) {
     console.error("archiveToStorage error", e);
@@ -72,8 +89,7 @@ export async function GET(_req: Request, ctx: RouteContext) {
             const kieUrl = urls[0] || null;
             let finalUrl: string | null = kieUrl;
             if (kieUrl) {
-              const ext = kieUrl.includes(".webp") ? "webp" : kieUrl.includes(".jpg") || kieUrl.includes(".jpeg") ? "jpg" : "png";
-              finalUrl = await archiveToStorage(supabase, kieUrl, `${batchId}/${item.item_id}.${ext}`);
+              finalUrl = await archiveToStorage(supabase, kieUrl, batchId, item.item_id);
             }
             await supabase
               .from("items")
@@ -86,7 +102,13 @@ export async function GET(_req: Request, ctx: RouteContext) {
             item.status = "done";
             item.output_url = finalUrl;
           } else if (state === "fail") {
-            const err = (record.error as string) || (record.errorMessage as string) || "kie task failed";
+            const failMsg =
+              (record.failMsg as string) ||
+              (record.error as string) ||
+              (record.errorMessage as string) ||
+              "kie task failed";
+            const failCode = (record.failCode as string) || "";
+            const err = failCode ? `[${failCode}] ${failMsg}` : failMsg;
             await supabase
               .from("items")
               .update({

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PromptBar } from "./PromptBar";
 import { Gallery, GalleryItem } from "./Gallery";
+import { ImagePreviewModal } from "./ImagePreviewModal";
 
 type ImageModelInfo = {
   key: string;
@@ -10,7 +11,11 @@ type ImageModelInfo = {
   vendor: string;
   aspectRatios: string[];
   qualities: string[];
-  pricePerImage: number;
+  pricing: Record<string, number>;
+  defaultPricePerImage: number;
+  pricingNote?: string;
+  maxInputImages: number;
+  badge?: "TOP" | "NEW" | "SOON";
 };
 
 type Props = {
@@ -24,7 +29,19 @@ type ActiveBatch = {
   modelKey: string;
   aspectRatio: string;
   quality: string;
-  itemIds: string[]; // pre-allocated item placeholders before first poll
+  itemIds: string[];
+};
+
+// sessionStorage handoff slot. The Prompts page writes a payload here right
+// before navigating to "/", and HomeStudio drains it on mount to prefill the
+// PromptBar and (optionally) auto-run a generation.
+const HANDOFF_KEY = "pf:nanoHandoff";
+
+type HandoffPayload = {
+  prompt: string;
+  modelKey?: string;
+  autorun?: boolean;
+  ts?: number;
 };
 
 export function HomeStudio({ models, initialItems }: Props) {
@@ -32,7 +49,29 @@ export function HomeStudio({ models, initialItems }: Props) {
   const [active, setActive] = useState<ActiveBatch[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<GalleryItem | null>(null);
+  const [initialPrompt, setInitialPrompt] = useState<string | undefined>(undefined);
+  const [initialModelKey, setInitialModelKey] = useState<string | undefined>(undefined);
+  const [autoSubmitToken, setAutoSubmitToken] = useState<string | null>(null);
   const pollers = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+
+  // Drain the sessionStorage handoff exactly once.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.sessionStorage.getItem(HANDOFF_KEY);
+      if (!raw) return;
+      window.sessionStorage.removeItem(HANDOFF_KEY);
+      const payload = JSON.parse(raw) as HandoffPayload;
+      if (typeof payload.prompt === "string" && payload.prompt.trim()) {
+        setInitialPrompt(payload.prompt);
+        if (payload.modelKey) setInitialModelKey(payload.modelKey);
+        if (payload.autorun) setAutoSubmitToken(String(payload.ts || Date.now()));
+      }
+    } catch {
+      /* ignore — handoff is best-effort */
+    }
+  }, []);
 
   const stopPolling = useCallback((batchId: string) => {
     const id = pollers.current.get(batchId);
@@ -103,6 +142,7 @@ export function HomeStudio({ models, initialItems }: Props) {
       aspectRatio: string;
       quality: string;
       count: number;
+      inputUrls: string[];
     }) => {
       setBusy(true);
       setError(null);
@@ -171,6 +211,18 @@ export function HomeStudio({ models, initialItems }: Props) {
     };
   }, []);
 
+  const handleCancel = useCallback(async (itemId: string) => {
+    // Optimistic remove: drop the item immediately. KIE keeps billing the job,
+    // but the user no longer sees the placeholder.
+    setItems((prev) => prev.filter((i) => i.item_id !== itemId));
+    try {
+      await fetch(`/api/item/${encodeURIComponent(itemId)}/cancel`, { method: "POST" });
+    } catch {
+      // best-effort — if the server call fails the item just won't be marked
+      // cancelled in DB, but it's gone from the UI for this session.
+    }
+  }, []);
+
   return (
     <>
       {active.length > 0 && (
@@ -184,8 +236,16 @@ export function HomeStudio({ models, initialItems }: Props) {
           {error}
         </div>
       )}
-      <Gallery items={items} />
-      <PromptBar models={models} busy={busy} onSubmit={handleSubmit} />
+      <Gallery items={items} onCancel={handleCancel} onOpen={setPreview} />
+      <PromptBar
+        models={models}
+        busy={busy}
+        onSubmit={handleSubmit}
+        initialPrompt={initialPrompt}
+        initialModelKey={initialModelKey}
+        autoSubmitToken={autoSubmitToken}
+      />
+      <ImagePreviewModal item={preview} onClose={() => setPreview(null)} />
     </>
   );
 }

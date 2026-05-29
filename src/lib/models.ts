@@ -1,22 +1,26 @@
 // Registry of KIE.ai models exposed by PixelForge.
 //
-// The `kieModel*` IDs below align with KIE.ai's public catalog as of 2026-05.
-// If a submission fails with "model not found", verify the exact string at
-// https://kie.ai/models and edit here. Pricing is indicative — KIE's billing
-// dashboard is authoritative.
+// IDs validated against KIE.ai docs and live API. Prices flagged with
+// `pricingNote: "Estimated"` are educated guesses until confirmed on
+// https://kie.ai/pricing.
 
 export type ImageModel = {
   label: string;
   vendor: string;
-  kieModelT2I: string;
+  kieModelT2I: string | null;
   kieModelI2I: string | null;
   supports: Array<"t2i" | "i2i" | "edit">;
   aspectRatios: string[];
-  resolutions: string[];
-  qualities: string[]; // e.g. ["1K", "2K", "4K"] — sent to KIE as image_size
-  pricePerImage: number;
+  qualities: string[]; // UI labels for the quality selector
+  qualityParam: "resolution" | "quality" | "none"; // KIE input field name
+  // Optional remap from UI label -> KIE value (e.g. Seedream: 2K -> basic)
+  qualityMap?: Record<string, string>;
+  pricing: Record<string, number>;
+  defaultPricePerImage: number;
+  pricingNote?: string;
   maxInputImages: number;
   notes: string;
+  badge?: "TOP" | "NEW" | "SOON";
 };
 
 export type VideoModel = {
@@ -40,6 +44,23 @@ export type AvatarModel = {
   maxAudioSeconds: number;
 };
 
+export type LipsyncQuality = {
+  label: string;          // "Pro" / "Standard"
+  resolution: string;     // "1080P" / "720P"
+  fps: number;            // 48 / 24
+  kieModel: string;       // KIE model id for this quality
+  pricePerSecond: number; // USD per second of audio
+};
+
+export type LipsyncModel = {
+  label: string;
+  vendor: string;
+  maxAudioSeconds: number;
+  qualities: LipsyncQuality[]; // first entry = default
+  badge?: "TOP" | "NEW" | "SOON" | "PREMIUM";
+  notes: string;
+};
+
 export type UpscaleModel = {
   label: string;
   vendor: string;
@@ -49,9 +70,10 @@ export type UpscaleModel = {
   pricePerSecond?: number;
 };
 
-// IDs validated against KIE.ai live API on 2026-05-28.
-// Others are commented out — confirm their exact IDs at https://kie.ai/market
-// then add them back.
+export function priceForQuality(model: ImageModel, quality: string): number {
+  return model.pricing[quality] ?? model.defaultPricePerImage;
+}
+
 export const IMAGE_MODELS: Record<string, ImageModel> = {
   "nano-banana-pro": {
     label: "Nano Banana Pro",
@@ -59,12 +81,15 @@ export const IMAGE_MODELS: Record<string, ImageModel> = {
     kieModelT2I: "nano-banana-pro",
     kieModelI2I: "nano-banana-pro",
     supports: ["t2i", "i2i"],
-    aspectRatios: ["1:1", "9:16", "16:9", "4:3", "3:4", "3:2", "2:3"],
-    resolutions: ["1024x1024", "1024x1792", "1792x1024"],
+    aspectRatios: ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9", "auto"],
     qualities: ["1K", "2K", "4K"],
-    pricePerImage: 0.24,
-    maxInputImages: 3,
-    notes: "In-image text rendering, product fidelity, editorial style.",
+    qualityParam: "resolution",
+    // Confirmed on KIE Tarification (May 2026)
+    pricing: { "1K": 0.09, "2K": 0.09, "4K": 0.12 },
+    defaultPricePerImage: 0.09,
+    maxInputImages: 8,
+    notes: "Best 4K image model. Strong in-image text rendering & brand fidelity.",
+    badge: "TOP",
   },
   "nano-banana": {
     label: "Nano Banana",
@@ -73,11 +98,61 @@ export const IMAGE_MODELS: Record<string, ImageModel> = {
     kieModelI2I: "google/nano-banana",
     supports: ["t2i", "i2i"],
     aspectRatios: ["1:1", "9:16", "16:9", "4:3", "3:4"],
-    resolutions: ["1024x1024", "1024x1792", "1792x1024"],
     qualities: ["1K", "2K"],
-    pricePerImage: 0.039,
+    qualityParam: "resolution",
+    pricing: { "1K": 0.02, "2K": 0.039 },
+    defaultPricePerImage: 0.039,
+    pricingNote: "Estimated",
     maxInputImages: 3,
-    notes: "Fast & cheap variant of Nano Banana.",
+    notes: "Fast & cheap variant of Nano Banana Pro.",
+  },
+  "gpt-image-2": {
+    label: "GPT Image 2",
+    vendor: "OpenAI",
+    kieModelT2I: "gpt-image-2-text-to-image",
+    kieModelI2I: "gpt-image-2-image-to-image",
+    supports: ["t2i", "i2i"],
+    aspectRatios: ["auto", "1:1", "3:2", "2:3", "4:3", "3:4", "5:4", "4:5", "16:9", "9:16", "21:9", "9:21"],
+    qualities: ["1K", "2K", "4K"],
+    qualityParam: "resolution",
+    pricing: { "1K": 0.04, "2K": 0.07, "4K": 0.16 },
+    defaultPricePerImage: 0.07,
+    pricingNote: "Estimated",
+    maxInputImages: 16,
+    notes: "4K with near-perfect text rendering. Note: 1:1 cannot reach 4K; aspect=auto forces 1K.",
+    badge: "NEW",
+  },
+  "seedream-4-5": {
+    label: "Seedream 4.5",
+    vendor: "ByteDance",
+    kieModelT2I: "seedream/4.5-text-to-image",
+    kieModelI2I: null,
+    supports: ["t2i"],
+    aspectRatios: ["1:1", "4:3", "3:4", "16:9", "9:16", "2:3", "3:2", "21:9"],
+    qualities: ["2K", "4K"], // UI labels — sent as basic/high
+    qualityParam: "quality",
+    qualityMap: { "2K": "basic", "4K": "high" },
+    pricing: { "2K": 0.05, "4K": 0.10 },
+    defaultPricePerImage: 0.05,
+    pricingNote: "Estimated",
+    maxInputImages: 0,
+    notes: "Photorealistic with intelligent visual reasoning.",
+  },
+  "wan-2-7-image-pro": {
+    label: "Wan 2.7 Pro",
+    vendor: "Alibaba",
+    kieModelT2I: "wan/2-7-image-pro",
+    kieModelI2I: "wan/2-7-image-pro",
+    supports: ["t2i", "i2i", "edit"],
+    aspectRatios: ["1:1", "16:9", "4:3", "21:9", "3:4", "9:16", "8:1", "1:8"],
+    qualities: ["1K", "2K", "4K"],
+    qualityParam: "resolution",
+    pricing: { "1K": 0.04, "2K": 0.06, "4K": 0.10 },
+    defaultPricePerImage: 0.06,
+    pricingNote: "Estimated",
+    maxInputImages: 9,
+    notes: "Strong editing capabilities, supports panoramic 8:1 / 1:8.",
+    badge: "NEW",
   },
 };
 
@@ -94,87 +169,74 @@ export const VIDEO_MODELS: Record<string, VideoModel> = {
     pricePerSecond: { std: 0.18, pro: 0.28 },
     usesVeoEndpoint: false,
   },
-  "kling-v2-5-turbo-pro": {
-    label: "Kling 2.5 Turbo Pro",
+};
+
+export const AVATAR_MODELS: Record<string, AvatarModel> = {};
+export const UPSCALE_MODELS: Record<string, UpscaleModel> = {};
+
+// ---------------------------------------------------------------------------
+// Video creation (text+image -> video)
+// ---------------------------------------------------------------------------
+
+export type VideoCreateQuality = {
+  label: string;          // "Std" / "Pro" / "4K"
+  displayLabel: string;   // "720p" / "1080p" / "4K"
+  resolution: string;     // e.g. "1920×1080"
+  kieMode: string;        // value passed to KIE: "std" | "pro" | "4K"
+  // KIE bills more when sound is enabled (+50% on Std/Pro, no premium on 4K).
+  pricePerSecondNoAudio: number;
+  pricePerSecondWithAudio: number;
+};
+
+export type VideoCreateModel = {
+  label: string;
+  vendor: string;
+  kieModel: string;
+  aspectRatios: string[];
+  durations: number[];
+  qualities: VideoCreateQuality[];
+  supportsEndFrame: boolean;
+  supportsSound: boolean;
+  pricingNote?: string;
+  badge?: "TOP" | "NEW" | "SOON" | "PREMIUM";
+  notes: string;
+};
+
+export const VIDEO_CREATE_MODELS: Record<string, VideoCreateModel> = {
+  "kling-3-0-video": {
+    label: "Kling 3.0",
     vendor: "Kling",
-    kieModelT2V: "kling/kling-v2-5-turbo-pro",
-    kieModelI2V: "kling/kling-v2-5-turbo-pro",
-    supports: ["t2v", "i2v"],
+    kieModel: "kling-3.0/video",
     aspectRatios: ["16:9", "9:16", "1:1"],
-    resolutions: ["std", "pro"],
-    durations: [5, 10],
-    pricePerSecond: { std: 0.14, pro: 0.22 },
-    usesVeoEndpoint: false,
-  },
-  "sora-2": {
-    label: "Sora 2",
-    vendor: "OpenAI",
-    kieModelT2V: "openai/sora-2",
-    kieModelI2V: null,
-    supports: ["t2v"],
-    aspectRatios: ["16:9", "9:16", "1:1"],
-    resolutions: ["720p", "1080p"],
-    durations: [4, 8, 12],
-    pricePerSecond: { "720p": 0.12, "1080p": 0.22 },
-    usesVeoEndpoint: false,
-  },
-  "veo-3": {
-    label: "Veo 3",
-    vendor: "Google",
-    kieModelT2V: "google/veo-3",
-    kieModelI2V: "google/veo-3",
-    supports: ["t2v", "i2v", "audio"],
-    aspectRatios: ["16:9", "9:16"],
-    resolutions: ["720p", "1080p"],
-    durations: [5, 8],
-    pricePerSecond: { "720p": 0.3, "1080p": 0.5 },
-    usesVeoEndpoint: true,
-  },
-  "seedance-v1-pro": {
-    label: "Seedance V1 Pro",
-    vendor: "ByteDance",
-    kieModelT2V: "bytedance/seedance-v1-pro",
-    kieModelI2V: "bytedance/seedance-v1-pro",
-    supports: ["t2v", "i2v"],
-    aspectRatios: ["16:9", "9:16", "1:1"],
-    resolutions: ["480p", "720p", "1080p"],
-    durations: [5, 10],
-    pricePerSecond: { "480p": 0.06, "720p": 0.1, "1080p": 0.18 },
-    usesVeoEndpoint: false,
+    durations: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    qualities: [
+      // KIE official: credits/s @ $0.005/credit (1000 credits = $5).
+      // Std:  14 cr / 20 cr — 720p
+      // Pro:  18 cr / 27 cr — 1080p
+      // 4K:   67 cr (same with/without audio) — 4K
+      { label: "Std", displayLabel: "720p",  resolution: "1280×720",  kieMode: "std", pricePerSecondNoAudio: 0.07,  pricePerSecondWithAudio: 0.10  },
+      { label: "Pro", displayLabel: "1080p", resolution: "1920×1080", kieMode: "pro", pricePerSecondNoAudio: 0.09,  pricePerSecondWithAudio: 0.135 },
+      { label: "4K",  displayLabel: "4K",    resolution: "3840×2160", kieMode: "4K",  pricePerSecondNoAudio: 0.335, pricePerSecondWithAudio: 0.335 },
+    ],
+    supportsEndFrame: true,
+    supportsSound: true,
+    badge: "TOP",
+    notes: "Image-to-video with start frame + optional end frame. Single shot, 3-15s.",
   },
 };
 
-export const AVATAR_MODELS: Record<string, AvatarModel> = {
-  "kling-avatar-2-std": {
-    label: "Kling Avatar 2.0 Std",
+export const LIPSYNC_MODELS: Record<string, LipsyncModel> = {
+  "kling-avatars-2": {
+    label: "Kling Avatars 2.0",
     vendor: "Kling",
-    kieModel: "kling/kling-avatar-2-std",
-    pricePerSecond: 0.3,
     maxAudioSeconds: 300,
-  },
-  "kling-avatar-2-pro": {
-    label: "Kling Avatar 2.0 Pro",
-    vendor: "Kling",
-    kieModel: "kling/kling-avatar-2-pro",
-    pricePerSecond: 0.5,
-    maxAudioSeconds: 300,
-  },
-};
-
-export const UPSCALE_MODELS: Record<string, UpscaleModel> = {
-  "topaz-image": {
-    label: "Topaz Image Upscale",
-    vendor: "Topaz Labs",
-    kieModel: "topaz/image-upscale",
-    factors: [2, 4, 8],
-    pricePerImage: 0.05,
-  },
-  "topaz-video": {
-    label: "Topaz Video Upscale",
-    vendor: "Topaz Labs",
-    kieModel: "topaz/video-upscale",
-    factors: [2, 4],
-    pricePerSecond: 0.4,
+    qualities: [
+      // Pro is the default — higher resolution, double the price.
+      { label: "Pro",      resolution: "1080P", fps: 48, kieModel: "kling/ai-avatar-pro",      pricePerSecond: 0.08 },
+      { label: "Standard", resolution: "720P",  fps: 24, kieModel: "kling/ai-avatar-standard", pricePerSecond: 0.04 },
+    ],
+    badge: "TOP",
+    notes: "Talking-head avatar. Choose between 1080P (Pro) and 720P (Standard).",
   },
 };
 
@@ -184,5 +246,6 @@ export function getAllModels() {
     video: VIDEO_MODELS,
     avatar: AVATAR_MODELS,
     upscale: UPSCALE_MODELS,
+    lipsync: LIPSYNC_MODELS,
   };
 }

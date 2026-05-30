@@ -613,68 +613,89 @@ export function BriefBatchWizard() {
     }
   }, []);
 
+  // Wraps a polling loop in a Promise that resolves the moment the Kling
+  // job lands in a terminal state (done OR failed). This is what makes
+  // runLipsyncBatch's "wave of 2" model work: a wave only advances when
+  // BOTH jobs in it have actually completed, not just when their POSTs
+  // returned.
   const startLsPolling = useCallback(
-    (id: string, batchId: string, briefId: string, hookId: string, avatarId: string) => {
-      stopLsPolling(id);
-      const poll = async () => {
-        try {
-          const r = await fetch(`/api/batch/${batchId}/status`, { cache: "no-store" });
-          if (!r.ok) return;
-          const data = (await r.json()) as {
-            items?: Array<{ status: string; output_url?: string | null; error?: string | null }>;
-          };
-          const item = data.items?.[0];
-          if (!item) return;
-          if (item.status === "done" && item.output_url) {
-            const brief = briefs.get(briefId);
-            if (brief) {
-              const next: Brief = {
-                ...brief,
-                hooks: brief.hooks.map((h) =>
-                  h.id === hookId
-                    ? {
-                        ...h,
-                        avatars: h.avatars.map((a) =>
-                          a.id === avatarId
-                            ? {
-                                ...a,
-                                lipsyncStatus: "done",
-                                lipsyncVideoUrl: item.output_url || undefined,
-                              }
-                            : a,
-                        ),
-                      }
-                    : h,
-                ),
-              };
-              const saved = upsertBrief(next);
-              setBriefs((m) => {
-                const nm = new Map(m);
-                nm.set(briefId, saved);
+    (
+      id: string,
+      batchId: string,
+      briefId: string,
+      hookId: string,
+      avatarId: string,
+    ): Promise<void> => {
+      return new Promise<void>((resolve) => {
+        stopLsPolling(id);
+        const finish = () => {
+          stopLsPolling(id);
+          resolve();
+        };
+        const poll = async () => {
+          try {
+            const r = await fetch(`/api/batch/${batchId}/status`, { cache: "no-store" });
+            if (!r.ok) return;
+            const data = (await r.json()) as {
+              items?: Array<{
+                status: string;
+                output_url?: string | null;
+                error?: string | null;
+              }>;
+            };
+            const item = data.items?.[0];
+            if (!item) return;
+            if (item.status === "done" && item.output_url) {
+              const brief = briefs.get(briefId);
+              if (brief) {
+                const next: Brief = {
+                  ...brief,
+                  hooks: brief.hooks.map((h) =>
+                    h.id === hookId
+                      ? {
+                          ...h,
+                          avatars: h.avatars.map((a) =>
+                            a.id === avatarId
+                              ? {
+                                  ...a,
+                                  lipsyncStatus: "done",
+                                  lipsyncVideoUrl: item.output_url || undefined,
+                                }
+                              : a,
+                          ),
+                        }
+                      : h,
+                  ),
+                };
+                const saved = upsertBrief(next);
+                setBriefs((m) => {
+                  const nm = new Map(m);
+                  nm.set(briefId, saved);
+                  return nm;
+                });
+              }
+              setLipsyncState((s) => {
+                const nm = new Map(s);
+                nm.set(id, { status: "done", url: item.output_url || undefined });
                 return nm;
               });
+              finish();
+            } else if (item.status === "failed") {
+              setLipsyncState((s) => {
+                const nm = new Map(s);
+                nm.set(id, { status: "error", error: item.error || "Kling failed" });
+                return nm;
+              });
+              finish();
             }
-            setLipsyncState((s) => {
-              const nm = new Map(s);
-              nm.set(id, { status: "done", url: item.output_url || undefined });
-              return nm;
-            });
-            stopLsPolling(id);
-          } else if (item.status === "failed") {
-            setLipsyncState((s) => {
-              const nm = new Map(s);
-              nm.set(id, { status: "error", error: item.error || "Kling failed" });
-              return nm;
-            });
-            stopLsPolling(id);
+          } catch {
+            /* blip — keep polling */
           }
-        } catch {
-          /* blip */
-        }
-      };
-      const i = setInterval(poll, 6000);
-      lsPollersRef.current.set(id, i);
-      void poll();
+        };
+        const i = setInterval(poll, 6000);
+        lsPollersRef.current.set(id, i);
+        void poll();
+      });
     },
     [briefs, stopLsPolling],
   );
@@ -719,7 +740,15 @@ export function BriefBatchWizard() {
         });
         const data = await r.json();
         if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
-        startLsPolling(job.id, data.batch_id, job.briefId, job.hookId, job.avatar.id);
+        // Block until polling reports a terminal state — required so
+        // the wave loop in runLipsyncBatch can advance correctly.
+        await startLsPolling(
+          job.id,
+          data.batch_id,
+          job.briefId,
+          job.hookId,
+          job.avatar.id,
+        );
       } catch (e) {
         setLipsyncState((s) => {
           const nm = new Map(s);
@@ -731,21 +760,21 @@ export function BriefBatchWizard() {
     [startLsPolling],
   );
 
+  // Strict waves of 2: fire 2 lipsync jobs in parallel, wait for BOTH
+  // to land in a terminal state (done OR failed), then fire the next 2,
+  // and so on. Matches the user's request: predictable "2 en cours →
+  // 2 done → 2 en cours → 2 done → …" cadence with no idle workers.
   const runLipsyncBatch = useCallback(async () => {
     if (lipsyncJobs.length === 0) return;
     lsAbortRef.current?.abort();
     const ac = new AbortController();
     lsAbortRef.current = ac;
-    const concurrency = 3;
+    const WAVE_SIZE = 2;
     const queue = lipsyncJobs.slice();
-    const worker = async () => {
-      while (queue.length > 0 && !ac.signal.aborted) {
-        const job = queue.shift();
-        if (!job) break;
-        await runOneLipsync(job);
-      }
-    };
-    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    while (queue.length > 0 && !ac.signal.aborted) {
+      const wave = queue.splice(0, WAVE_SIZE);
+      await Promise.allSettled(wave.map((job) => runOneLipsync(job)));
+    }
   }, [lipsyncJobs, runOneLipsync]);
 
   const cancelLipsyncBatch = useCallback(() => {
@@ -1798,7 +1827,7 @@ function Step5Lipsync({
     <div className="space-y-5">
       <Intro
         title="Génère tous les lipsyncs"
-        body="On envoie à Kling chaque (image + voix off) prêt(e). Les vidéos s'attribuent automatiquement au bon brief. Compte ~1 min par lipsync, jusqu'à 3 en parallèle."
+        body="On envoie à Kling 2 lipsyncs en parallèle. Dès que les deux sont terminés (succès ou erreur), on lance les 2 suivants — et ainsi de suite. Chaque vidéo s'attribue automatiquement au bon brief. Compte ~1 min par lipsync."
       />
 
       <div className="bg-pf-elev border border-pf-border rounded-2xl px-5 py-4 flex flex-wrap items-center gap-3">

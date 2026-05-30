@@ -152,6 +152,10 @@ export function GdocImportModal({ defaultAvatarCount, onClose, onImported }: Pro
           </button>
         </div>
 
+        {/* Legend — the 5 conventions of the Google Doc, visible upfront
+            so the user remembers each marker's role without reading docs. */}
+        <Legend />
+
         {/* Body: 2 columns — left paste / right preview */}
         <div className="flex-1 grid grid-cols-1 md:grid-cols-2 overflow-hidden">
           {/* Paste column */}
@@ -192,19 +196,10 @@ export function GdocImportModal({ defaultAvatarCount, onClose, onImported }: Pro
               className="flex-1 bg-pf-bg border border-pf-border rounded-xl px-4 py-3 text-sm font-mono leading-relaxed focus:outline-none focus:border-pf-accent resize-none"
               spellCheck={false}
             />
-            <div className="text-xs text-pf-muted leading-relaxed space-y-1">
-              <div>
-                Format : <code>Ad Test #N - Créa</code> puis{" "}
-                <code>Référence:</code> (URL), <code>Avatars : V1=2, H2=1, H3=0</code>,
-                corps du script, et 3 hooks terminaux{" "}
-                <code>Ad #N - Créa - Hook N</code>.
-              </div>
-              <div>
-                <code className="text-pf-accent">*</code> ma note perso →
-                totalement ignorée. <code className="text-pf-accent">&gt;</code> ma
-                note monteur → atterrit dans Filming notes sur Notion (par
-                hook si écrite sous le hook, sinon V1).
-              </div>
+            <div className="text-xs text-pf-muted leading-relaxed">
+              Plusieurs ads dans un seul doc → sépare-les juste par le prochain{" "}
+              <code>Ad Test #N - …</code>. La légende ci-dessus rappelle les
+              autres marqueurs.
             </div>
           </div>
 
@@ -433,6 +428,87 @@ function AvatarChip({ label, n }: { label: string; n: number }) {
     >
       {label}=<span className="font-bold">{n}</span>
     </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Legend strip — visible cheat sheet of the 5 conventions used in the
+// Google Doc. Sits between the modal header and the paste/preview body.
+// ---------------------------------------------------------------------------
+
+type LegendItem = {
+  marker: string;
+  /** Tailwind colour classes applied to the marker chip. */
+  chipClass: string;
+  title: string;
+  body: string;
+};
+
+const LEGEND_ITEMS: LegendItem[] = [
+  {
+    marker: "*",
+    chipClass: "bg-pf-soft text-pf-muted line-through decoration-pf-muted/60",
+    title: "Note perso",
+    body: "Ignorée partout. Pour tes mémos d'organisation.",
+  },
+  {
+    marker: ">",
+    chipClass: "bg-pf-accent/15 text-pf-accent border-pf-accent/40",
+    title: "Note monteur",
+    body: "Atterrit dans Filming notes de Notion, par hook.",
+  },
+  {
+    marker: "ABC",
+    chipClass: "bg-pf-warn/15 text-pf-warn border-pf-warn/40 font-bold",
+    title: "Setup vidéo",
+    body: "Ligne EN MAJUSCULES = scène. Strippée du VO, mise dans Filming notes.",
+  },
+  {
+    marker: "Réf:",
+    chipClass: "bg-pf-soft text-pf-text border-pf-border",
+    title: "Métadonnées",
+    body: "Référence: / Avatars: → champs structurés du brief.",
+  },
+  {
+    marker: "Ad #N",
+    chipClass: "bg-pf-soft text-pf-text border-pf-border",
+    title: "Headers de hook",
+    body: 'Ad #1 (Original) = V1. Ad #2 - Hook 2 / Ad #3 - Hook 3 = variantes.',
+  },
+];
+
+function Legend() {
+  return (
+    <div className="border-b border-pf-border bg-pf-bg/40 px-6 py-3">
+      <div className="text-[11px] uppercase tracking-wider text-pf-muted font-bold mb-2">
+        Conventions du doc
+      </div>
+      <ol className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+        {LEGEND_ITEMS.map((it, i) => (
+          <li
+            key={i}
+            className="flex items-start gap-2 bg-pf-elev border border-pf-border rounded-lg px-2.5 py-2 min-w-0"
+          >
+            <span className="text-[10px] font-mono font-bold text-pf-muted shrink-0 mt-0.5">
+              {i + 1}.
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5 mb-0.5">
+                <code
+                  className={`text-xs font-mono font-bold rounded px-1.5 py-0.5 border ${it.chipClass}`}
+                >
+                  {it.marker}
+                </code>
+                <span className="text-xs font-semibold text-pf-text truncate">
+                  {it.title}
+                </span>
+              </div>
+              <p className="text-[11px] text-pf-dim leading-snug">{it.body}</p>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
   );
 }
 

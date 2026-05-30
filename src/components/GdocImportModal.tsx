@@ -68,6 +68,16 @@ export function GdocImportModal({ defaultAvatarCount, onClose, onImported }: Pro
         if (b.hooks[1]) b.hooks[1].hookScript = h2;
         if (b.hooks[2]) b.hooks[2].hookScript = h3;
         b.baseScript = v1; // store for reference
+        // Scene setups (UPPERCASE lines like "HOMME DERMATO LUNETTE #1")
+        // are stripped from the script by the parser. We surface them as
+        // per-hook filming notes so the monteur sees them in Notion
+        // without the TTS reading them aloud.
+        if (ad.scenes.length > 0) {
+          const notesText = formatScenesAsNotes(ad.scenes);
+          for (const h of b.hooks) {
+            h.notes = notesText;
+          }
+        }
         const saved = upsertBrief(b);
         created.push(saved);
       }
@@ -304,8 +314,34 @@ function AdPreview({ ad }: { ad: ParsedAd }) {
           {ad.v1Script.length > 180 ? "…" : ""}
         </div>
       )}
+
+      {ad.scenes.length > 0 && (
+        <div className="mt-2 pt-2 border-t border-pf-border/60">
+          <div className="text-[10px] uppercase tracking-wider text-pf-muted font-bold mb-1">
+            Setups vidéo détectés ({ad.scenes.length}) — basculés en note monteur
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {ad.scenes.map((s, i) => (
+              <span
+                key={i}
+                className="text-[10px] font-mono text-pf-dim bg-pf-soft border border-pf-border rounded px-1.5 py-0.5 truncate max-w-[200px]"
+                title={s}
+              >
+                {s}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+// Format the extracted scene markers as a readable note for the monteur.
+// Surfaces as "Filming notes" block in Notion via brief.hook.notes.
+function formatScenesAsNotes(scenes: string[]): string {
+  const lines = scenes.map((s, i) => `${i + 1}. ${s}`);
+  return `Setups vidéo (dans l'ordre du script) :\n${lines.join("\n")}`;
 }
 
 function HookLine({

@@ -41,9 +41,14 @@ export type ParsedAd = {
   briefName: string; // e.g. "Ad Test #1"
   creativeName: string; // e.g. "Anti-Fake Dermato"
   creativeRef?: string; // URL from "Référence:" line
-  /** Full V1 script — body sections concatenated. Already opens with the
-   *  Hook 1 line if `hook1Line` is set. */
+  /** Spoken-only body of V1 — scene-marker lines (UPPERCASE setup labels
+   *  like "HOMME DERMATO LUNETTE #1 :") are stripped out and surface in
+   *  `scenes` instead, so the VO TTS never reads them aloud. */
   v1Script: string;
+  /** Scene/setup markers extracted from the body, in the order they
+   *  appeared. Drop these into hook.notes so the monteur sees them as
+   *  "Filming notes" in Notion without polluting the script. */
+  scenes: string[];
   hook1Line?: string;
   hook2Line?: string;
   hook3Line?: string;
@@ -139,11 +144,14 @@ function parseAdBlock(
   }
 
   // 3. Body = everything between "Référence:" line and the first hook
-  //    header. We strip the Référence line itself.
+  //    header. We strip the Référence line itself, then peel out any
+  //    UPPERCASE scene-marker lines so they don't leak into the VO.
   let body = block.slice(0, bodyEnd).trim();
   if (refMatch) {
     body = body.replace(refMatch[0], "").trim();
   }
+  const { spoken, scenes } = stripSceneHeaders(body);
+  body = spoken;
 
   if (!body) {
     warnings.push(`${briefName} : corps de script vide.`);
@@ -176,10 +184,64 @@ function parseAdBlock(
     creativeName,
     creativeRef,
     v1Script: body,
+    scenes,
     hook1Line: hookLines[1],
     hook2Line: hookLines[2],
     hook3Line: hookLines[3],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Scene-header extraction
+//
+// A "scene header" is a non-spoken filming direction the user inlines
+// inside a script (e.g. "HOMME DERMATO LUNETTE #1 :", "FEMME DERMATO
+// ECRAN SPECIAL :", "HOMME DERMATO LUNETTE #2)"). We detect them as
+// short, all-uppercase standalone lines so they can be peeled out of
+// the body that feeds the TTS, without losing the filming setup info
+// (we return it separately so the import flow can drop it into
+// hook.notes / brief.notes).
+//
+// Heuristic chosen for robustness:
+//   - whole line is uppercase (no lowercase letter present at all),
+//   - at least 3 alphabetic characters (skip stray single CAPS abbrev),
+//   - line length <= 100 chars (a sentence in CAPS rarely fits).
+// This catches every example in the user's Google Doc convention and
+// won't strip emphasis CAPS embedded inside a longer line of prose.
+// ---------------------------------------------------------------------------
+
+export function stripSceneHeaders(text: string): { spoken: string; scenes: string[] } {
+  const lines = text.split(/\n/);
+  const spokenLines: string[] = [];
+  const scenes: string[] = [];
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      spokenLines.push("");
+      continue;
+    }
+    if (isSceneHeader(trimmed)) {
+      const clean = trimmed.replace(/[\s:);.,]+$/, "").trim();
+      if (clean) scenes.push(clean);
+      // dropped — don't append to spokenLines
+      continue;
+    }
+    spokenLines.push(raw);
+  }
+  // Collapse runs of blank lines created by the deletions.
+  const spoken = spokenLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return { spoken, scenes };
+}
+
+function isSceneHeader(line: string): boolean {
+  if (line.length > 100) return false;
+  const alphaMatches = line.match(/[A-Za-zÀ-ÿ]/g);
+  if (!alphaMatches || alphaMatches.length < 3) return false;
+  // Whole line must be uppercase — i.e. it equals its own toUpperCase().
+  // Numbers, spaces and punctuation are unchanged by toUpperCase so this
+  // works on "HOMME DERMATO LUNETTE #1 :" but not on a normal sentence.
+  if (line !== line.toUpperCase()) return false;
+  return true;
 }
 
 function stripQuotes(s: string): string {
@@ -189,11 +251,16 @@ function stripQuotes(s: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Build the 3 hook scripts from a parsed ad. Returns { v1, h2, h3 } where:
-//   - v1 = the body as-is (already opens with Hook 1 line if present)
-//   - h2 = body with the Hook 1 line replaced by Hook 2 line, OR just the
-//          Hook 2 line if no Hook 1 to anchor on
-//   - h3 = same with Hook 3
+// Build the 3 hook scripts from a parsed ad.
+//
+// Workflow convention (set by the user):
+//   - V1 holds the FULL original script (entire body) → the V1 voice off
+//     is the long ~3-4 min recording used as the spine of every variant.
+//   - Hook 2 and Hook 3 hold ONLY their replacement opening line. The
+//     monteur splices the short Hook 2/3 VO at the start of the V1 video
+//     after cutting out V1's own opening. Generating the full body again
+//     for Hooks 2 and 3 would just produce 3 minutes of duplicate audio
+//     for no reason.
 // ---------------------------------------------------------------------------
 
 export type HookScripts = {
@@ -203,49 +270,8 @@ export type HookScripts = {
 };
 
 export function buildHookScripts(ad: ParsedAd): HookScripts {
-  const body = ad.v1Script;
-  const v1 = body;
-  const h2 = replaceOpeningOrFallback(body, ad.hook1Line, ad.hook2Line);
-  const h3 = replaceOpeningOrFallback(body, ad.hook1Line, ad.hook3Line);
+  const v1 = ad.v1Script;
+  const h2 = ad.hook2Line ?? "";
+  const h3 = ad.hook3Line ?? "";
   return { v1, h2, h3 };
-}
-
-function replaceOpeningOrFallback(
-  body: string,
-  hook1Line: string | undefined,
-  altLine: string | undefined,
-): string {
-  if (!altLine) return ""; // user must fill manually
-  if (!body) return altLine;
-  if (!hook1Line) {
-    // No anchor — prepend the alt line so at least the new opening is captured.
-    return `${altLine}\n\n${body}`.trim();
-  }
-  // Try a verbatim replacement.
-  if (body.includes(hook1Line)) {
-    return body.replace(hook1Line, altLine);
-  }
-  // Try a normalized comparison (strip whitespace + curly quotes).
-  const norm = (s: string) =>
-    s.replace(/\s+/g, " ").replace(/[“”]/g, '"').replace(/[‘’]/g, "'").trim();
-  const nb = norm(body);
-  const nh = norm(hook1Line);
-  const idx = nb.indexOf(nh);
-  if (idx >= 0) {
-    // Best-effort: rebuild by slicing on the original body using approximate
-    // positions. We rebuild the body around the FIRST sentence that resembles
-    // hook1Line.
-    // Find the first occurrence of the first ~30 chars of hook1Line in body.
-    const probe = hook1Line.slice(0, Math.min(30, hook1Line.length));
-    const probeIdx = body.indexOf(probe);
-    if (probeIdx >= 0) {
-      // Find end-of-sentence after probeIdx (next '.', '!', or '?').
-      const tail = body.slice(probeIdx);
-      const m = tail.match(/[.!?]/);
-      const eos = m ? probeIdx + (m.index ?? 0) + 1 : probeIdx + hook1Line.length;
-      return body.slice(0, probeIdx) + altLine + body.slice(eos);
-    }
-  }
-  // Last resort: prepend.
-  return `${altLine}\n\n${body}`.trim();
 }

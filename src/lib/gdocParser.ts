@@ -368,24 +368,22 @@ export function buildHookScripts(ad: ParsedAd): HookScripts {
 // ---------------------------------------------------------------------------
 // Personal-note line detection
 //
-// Any line whose first non-whitespace character(s) is `*` or `//` is a
-// personal note — completely dropped from the doc before any other
-// parsing happens. Notes never reach the VO TTS, the Notion filming
-// notes, or even the script preview. Examples:
+// Any line whose first non-whitespace character is `*` is a personal
+// note — completely dropped from the doc before any other parsing
+// happens. Notes never reach the VO TTS, the Notion filming notes, or
+// even the script preview. Examples:
 //
 //   * à valider avec le client
-//   // TODO: refaire le hook 3
-//   ** Important: ne pas oublier la musique
+//   ** Important : ne pas oublier la musique
+//   *Note rapide sans espace après l'étoile
 //
 // A `*` in the middle of a normal sentence (e.g. "Buy 1 * pack") stays
 // untouched — the detection only triggers when `*` is the very first
-// non-space character.
+// non-space character on the line.
 // ---------------------------------------------------------------------------
 
 export function isPersonalNoteLine(line: string): boolean {
   const trimmed = line.trim();
   if (!trimmed) return false;
-  if (trimmed.startsWith("*")) return true;
-  if (trimmed.startsWith("//")) return true;
-  return false;
+  return trimmed.startsWith("*");
 }

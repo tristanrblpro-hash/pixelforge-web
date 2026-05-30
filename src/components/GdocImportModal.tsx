@@ -199,8 +199,7 @@ export function GdocImportModal({ defaultAvatarCount, onClose, onImported }: Pro
               </div>
               <div>
                 Astuce notes perso : préfixe une ligne par{" "}
-                <code className="text-pf-accent">*</code> ou{" "}
-                <code className="text-pf-accent">//</code> pour qu&apos;elle soit
+                <code className="text-pf-accent">*</code> pour qu&apos;elle soit
                 totalement ignorée (ni en VO, ni dans Notion).
               </div>
             </div>
@@ -442,7 +441,7 @@ Référence: https://app.trendtrack.io/share/ads/...
 Avatars : V1=2, H2=1, H3=0
 
 * Note perso : à valider avec le client avant de lancer
-// TODO : refaire le hook 3 plus émotionnel
+* TODO : refaire le hook 3 plus émotionnel
 
 HOMME DERMATO LUNETTE #1 :
 Eye bags can actually get worse if you pick up a fake microneedle patch...

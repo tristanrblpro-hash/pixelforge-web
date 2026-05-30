@@ -4,14 +4,19 @@
 //
 // Steps:
 //   ① Briefs    — multi-add (brief name + creative name + avatar count)
-//   ② Scripts   — per-brief card with the 3 hook scripts (V1, Hook 2, Hook 3)
-//   ③ VO        — parallel ElevenLabs gen for the 30 hooks, live status grid
-//   ④ Avatars   — opens per-brief in the existing wizard (skipped if all 0)
-//   ⑤ Sync      — push every brief to Notion + Drive in parallel
+//   ② Scripts   — per-brief card with the 3 hook scripts + optional notes
+//   ③ VO        — per-brief card, parallel ElevenLabs gen + "Cut blanks"
+//   ④ Images    — per-brief mini-cards with "X/Y images" completion badge
+//   ⑤ Lipsync   — per-brief card, parallel Kling lipsync gen + polling
+//   ⑥ Sync      — push every brief to Notion + Drive in parallel
 //
-// Persistence happens at the end of step 1 (briefs hit localStorage there).
-// Steps 2-3 mutate the briefs in place via upsertBrief. Steps 4-5 just
-// orchestrate existing flows.
+// Cross-step UX:
+// - Larger typography (text-base body, text-lg subtitles, text-2xl titles)
+// - One card per brief everywhere (no dense tables)
+// - Persistent state in sessionStorage so navigating to /cut-silence and
+//   back doesn't reset the wizard
+// - Cut blanks routes to /cut-silence with audio preloaded + attach
+//   target preset; the studio routes back via `pf:cutSilenceReturnTo`
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -23,20 +28,25 @@ import {
   ChevronDown,
   ChevronRight,
   ExternalLink,
+  Image as ImageIcon,
   Loader2,
   Mic,
   Pause,
   Plus,
   RefreshCw,
+  Scissors,
   Sparkles,
   Users,
+  Video,
   X,
 } from "lucide-react";
 
 import {
+  type AvatarSlot,
   type Brief,
   loadBriefs,
   newBrief,
+  setAttachTarget,
   upsertBrief,
 } from "@/lib/briefs";
 import { runVoiceoverBatch, type VoBatchJob } from "@/lib/voiceoverBatch";
@@ -45,10 +55,9 @@ import { runVoiceoverBatch, type VoBatchJob } from "@/lib/voiceoverBatch";
 // Local types
 // ---------------------------------------------------------------------------
 
-type StepId = 1 | 2 | 3 | 4 | 5;
+type StepId = 1 | 2 | 3 | 4 | 5 | 6;
 
 type DraftRow = {
-  /** Stable client-side id (used as React key — never persisted). */
   rowId: string;
   briefName: string;
   creativeName: string;
@@ -64,18 +73,63 @@ type Voice = {
 };
 
 type VoCellStatus = "idle" | "running" | "done" | "error";
-
 type VoCellState = {
   status: VoCellStatus;
   error?: string;
   url?: string;
 };
 
-// Same favorites as VoiceoverStudio — preselected to "first available".
+type LsCellStatus = "idle" | "running" | "done" | "error";
+type LsCellState = {
+  status: LsCellStatus;
+  error?: string;
+  url?: string;
+};
+
+type SyncCellState = {
+  status: "idle" | "running" | "done" | "error";
+  error?: string;
+  url?: string;
+};
+
+// Same favorites as VoiceoverStudio.
 const FAVORITE_VOICE_IDS = [
   "T4x5CtnhOiichhcqFzgg",
   "G0yjIg3xY8gEJZkHpjVm",
 ] as const;
+
+const SESSION_STATE_KEY = "pf:batchWizard:v1";
+
+// ---------------------------------------------------------------------------
+// SessionStorage persistence — survives a hop to /cut-silence and back
+// ---------------------------------------------------------------------------
+
+type PersistedState = {
+  step: StepId;
+  rows: DraftRow[];
+  voState: Array<[string, VoCellState]>;
+  lipsyncState: Array<[string, LsCellState]>;
+};
+
+function loadWizardState(): PersistedState | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(SESSION_STATE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as PersistedState;
+  } catch {
+    return null;
+  }
+}
+
+function saveWizardState(s: PersistedState) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(SESSION_STATE_KEY, JSON.stringify(s));
+  } catch {
+    /* quota — skip */
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Root component
@@ -83,29 +137,81 @@ const FAVORITE_VOICE_IDS = [
 
 export function BriefBatchWizard() {
   const router = useRouter();
-  const [step, setStep] = useState<StepId>(1);
+  const hydrated = useRef(false);
 
-  // Step-1 rows. We always start with 5 empty rows so the user can dive
-  // straight into typing without clicking "+ add" first.
+  const [step, setStep] = useState<StepId>(1);
   const [rows, setRows] = useState<DraftRow[]>(() =>
     Array.from({ length: 5 }, () => makeRow()),
   );
-
-  // Committed briefs (after step 1). Indexed by row.briefId.
   const [briefs, setBriefs] = useState<Map<string, Brief>>(new Map());
 
-  // Step-3 voice + VO state
+  // VO state
   const [voices, setVoices] = useState<Voice[]>([]);
   const [voiceId, setVoiceId] = useState<string>("");
   const [voState, setVoState] = useState<Map<string, VoCellState>>(new Map());
   const voAbortRef = useRef<AbortController | null>(null);
 
-  // Step-5 sync state
-  const [syncState, setSyncState] = useState<
-    Map<string, { status: "idle" | "running" | "done" | "error"; error?: string; url?: string }>
-  >(new Map());
+  // Lipsync state
+  const [lipsyncState, setLipsyncState] = useState<Map<string, LsCellState>>(new Map());
+  const lsPollersRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+  const lsAbortRef = useRef<AbortController | null>(null);
 
-  // Fetch voices once.
+  // Sync state
+  const [syncState, setSyncState] = useState<Map<string, SyncCellState>>(new Map());
+
+  // ----- Hydrate from sessionStorage on mount -----
+  useEffect(() => {
+    if (hydrated.current) return;
+    hydrated.current = true;
+    const persisted = loadWizardState();
+    if (persisted) {
+      setStep(persisted.step);
+      setRows(persisted.rows.length > 0 ? persisted.rows : [makeRow()]);
+      setVoState(new Map(persisted.voState));
+      setLipsyncState(new Map(persisted.lipsyncState));
+      // Rehydrate briefs map from localStorage by id.
+      const all = loadBriefs();
+      const m = new Map<string, Brief>();
+      for (const r of persisted.rows) {
+        if (r.briefId) {
+          const b = all.find((x) => x.id === r.briefId);
+          if (b) m.set(b.id, b);
+        }
+      }
+      setBriefs(m);
+    }
+  }, []);
+
+  // ----- Persist on changes (debounced via microtask) -----
+  useEffect(() => {
+    if (!hydrated.current) return;
+    saveWizardState({
+      step,
+      rows,
+      voState: Array.from(voState.entries()),
+      lipsyncState: Array.from(lipsyncState.entries()),
+    });
+  }, [step, rows, voState, lipsyncState]);
+
+  // ----- Refresh briefs map from localStorage on focus -----
+  // (cut-silence may have updated cutVoUrl while we were navigated away)
+  useEffect(() => {
+    const onFocus = () => {
+      const all = loadBriefs();
+      setBriefs((prev) => {
+        const nm = new Map<string, Brief>();
+        for (const [id] of prev) {
+          const b = all.find((x) => x.id === id);
+          if (b) nm.set(id, b);
+        }
+        return nm;
+      });
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
+  // ----- Fetch voices once -----
   useEffect(() => {
     void (async () => {
       try {
@@ -119,7 +225,7 @@ export function BriefBatchWizard() {
           setVoiceId(fav || data.voices[0]?.voiceId || "");
         }
       } catch {
-        /* offline / API down — picker will be empty */
+        /* offline */
       }
     })();
   }, []);
@@ -140,8 +246,6 @@ export function BriefBatchWizard() {
     setRows((rs) => rs.map((r) => (r.rowId === id ? { ...r, ...patch } : r)));
   }, []);
 
-  // Validate then commit each non-empty row to localStorage. Empty rows
-  // (no brief name AND no creative name) are silently dropped.
   const commitBriefs = useCallback((): { ok: number; skipped: number } => {
     const nextBriefs = new Map(briefs);
     const nextRows: DraftRow[] = [];
@@ -154,7 +258,6 @@ export function BriefBatchWizard() {
         skipped++;
         continue;
       }
-      // If already committed, just keep.
       if (r.briefId && nextBriefs.has(r.briefId)) {
         nextRows.push(r);
         ok++;
@@ -173,19 +276,32 @@ export function BriefBatchWizard() {
   }, [briefs, rows]);
 
   // -----------------------------------------------------------------------
-  // Step 2 — Scripts
+  // Step 2 — Scripts + optional notes + creative ref
   // -----------------------------------------------------------------------
 
-  const updateHookScript = useCallback(
-    (briefId: string, hookId: string, script: string) => {
+  const updateHookField = useCallback(
+    (briefId: string, hookId: string, patch: { hookScript?: string; notes?: string }) => {
       const brief = briefs.get(briefId);
       if (!brief) return;
       const next: Brief = {
         ...brief,
-        hooks: brief.hooks.map((h) =>
-          h.id === hookId ? { ...h, hookScript: script } : h,
-        ),
+        hooks: brief.hooks.map((h) => (h.id === hookId ? { ...h, ...patch } : h)),
       };
+      const saved = upsertBrief(next);
+      setBriefs((m) => {
+        const nm = new Map(m);
+        nm.set(briefId, saved);
+        return nm;
+      });
+    },
+    [briefs],
+  );
+
+  const updateBriefField = useCallback(
+    (briefId: string, patch: { creativeRef?: string; notes?: string }) => {
+      const brief = briefs.get(briefId);
+      if (!brief) return;
+      const next: Brief = { ...brief, ...patch };
       const saved = upsertBrief(next);
       setBriefs((m) => {
         const nm = new Map(m);
@@ -212,7 +328,7 @@ export function BriefBatchWizard() {
         if (!h.hookScript.trim()) continue;
         const id = `${brief.id}:${h.id}`;
         const existing = voState.get(id);
-        if (existing?.status === "done") continue; // skip already generated
+        if (existing?.status === "done" || h.cutVoUrl) continue;
         jobs.push({
           id,
           voiceId,
@@ -230,7 +346,6 @@ export function BriefBatchWizard() {
     const ac = new AbortController();
     voAbortRef.current = ac;
 
-    // Mark all queued cells as running.
     setVoState((s) => {
       const nm = new Map(s);
       for (const j of voJobs) nm.set(j.id, { status: "running" });
@@ -248,9 +363,7 @@ export function BriefBatchWizard() {
           });
           return;
         }
-        // 'end'
         if (e.ok) {
-          // Persist URL into the brief's hook.cutVoUrl
           const [briefId, hookId] = e.id.split(":");
           const brief = briefs.get(briefId);
           if (brief) {
@@ -295,7 +408,7 @@ export function BriefBatchWizard() {
     });
   }, []);
 
-  const regenerateOne = useCallback(
+  const regenerateVo = useCallback(
     async (briefId: string, hookId: string) => {
       const brief = briefs.get(briefId);
       if (!brief) return;
@@ -356,8 +469,206 @@ export function BriefBatchWizard() {
     [briefs, voiceId, voices],
   );
 
+  // Cut-blanks handoff. Stores the audio URL + sets attach target then
+  // navigates to /cut-silence. The studio reads the handoff, lets the user
+  // cut, then writes the cleaned URL back into the brief.cutVoUrl. The
+  // sessionStorage `pf:cutSilenceReturnTo` tells the studio to send the
+  // user back here instead of into the per-brief wizard.
+  const handoffCut = useCallback(
+    (briefId: string, hookId: string, audioUrl: string) => {
+      if (typeof window === "undefined") return;
+      window.sessionStorage.setItem(
+        "pf:cutSilenceHandoff",
+        JSON.stringify({ audioUrl, fileName: `${briefId}_${hookId}.mp3` }),
+      );
+      window.sessionStorage.setItem("pf:cutSilenceReturnTo", "/briefs/batch");
+      setAttachTarget({ kind: "cutVo", briefId, hookId });
+      router.push("/cut-silence");
+    },
+    [router],
+  );
+
   // -----------------------------------------------------------------------
-  // Step 5 — Notion sync
+  // Step 5 — Lipsync batch
+  // -----------------------------------------------------------------------
+
+  type LipsyncJob = {
+    id: string; // briefId:hookId:avatarId
+    briefId: string;
+    hookId: string;
+    avatar: AvatarSlot;
+  };
+
+  const lipsyncJobs = useMemo((): LipsyncJob[] => {
+    const jobs: LipsyncJob[] = [];
+    for (const r of rows) {
+      if (!r.briefId) continue;
+      const brief = briefs.get(r.briefId);
+      if (!brief || brief.avatarCount === 0) continue;
+      for (const h of brief.hooks) {
+        for (const av of h.avatars) {
+          if (!av.imageUrl || !av.voClipUrl) continue;
+          if (av.lipsyncStatus === "done" && av.lipsyncVideoUrl) continue;
+          const id = `${brief.id}:${h.id}:${av.id}`;
+          const s = lipsyncState.get(id);
+          if (s?.status === "done" || s?.status === "running") continue;
+          jobs.push({ id, briefId: brief.id, hookId: h.id, avatar: av });
+        }
+      }
+    }
+    return jobs;
+  }, [briefs, rows, lipsyncState]);
+
+  const stopLsPolling = useCallback((id: string) => {
+    const t = lsPollersRef.current.get(id);
+    if (t) {
+      clearInterval(t);
+      lsPollersRef.current.delete(id);
+    }
+  }, []);
+
+  const startLsPolling = useCallback(
+    (id: string, batchId: string, briefId: string, hookId: string, avatarId: string) => {
+      stopLsPolling(id);
+      const poll = async () => {
+        try {
+          const r = await fetch(`/api/batch/${batchId}/status`, { cache: "no-store" });
+          if (!r.ok) return;
+          const data = (await r.json()) as {
+            items?: Array<{ status: string; output_url?: string | null; error?: string | null }>;
+          };
+          const item = data.items?.[0];
+          if (!item) return;
+          if (item.status === "done" && item.output_url) {
+            const brief = briefs.get(briefId);
+            if (brief) {
+              const next: Brief = {
+                ...brief,
+                hooks: brief.hooks.map((h) =>
+                  h.id === hookId
+                    ? {
+                        ...h,
+                        avatars: h.avatars.map((a) =>
+                          a.id === avatarId
+                            ? {
+                                ...a,
+                                lipsyncStatus: "done",
+                                lipsyncVideoUrl: item.output_url || undefined,
+                              }
+                            : a,
+                        ),
+                      }
+                    : h,
+                ),
+              };
+              const saved = upsertBrief(next);
+              setBriefs((m) => {
+                const nm = new Map(m);
+                nm.set(briefId, saved);
+                return nm;
+              });
+            }
+            setLipsyncState((s) => {
+              const nm = new Map(s);
+              nm.set(id, { status: "done", url: item.output_url || undefined });
+              return nm;
+            });
+            stopLsPolling(id);
+          } else if (item.status === "failed") {
+            setLipsyncState((s) => {
+              const nm = new Map(s);
+              nm.set(id, { status: "error", error: item.error || "Kling failed" });
+              return nm;
+            });
+            stopLsPolling(id);
+          }
+        } catch {
+          /* blip */
+        }
+      };
+      const i = setInterval(poll, 6000);
+      lsPollersRef.current.set(id, i);
+      void poll();
+    },
+    [briefs, stopLsPolling],
+  );
+
+  const runOneLipsync = useCallback(
+    async (job: LipsyncJob) => {
+      setLipsyncState((s) => {
+        const nm = new Map(s);
+        nm.set(job.id, { status: "running" });
+        return nm;
+      });
+      try {
+        // Decode audio duration client-side (the API needs it).
+        let audioDurationSec = 10;
+        try {
+          const resp = await fetch(job.avatar.voClipUrl!);
+          const buf = await resp.arrayBuffer();
+          const Ctx =
+            window.AudioContext ||
+            (window as unknown as { webkitAudioContext: typeof AudioContext })
+              .webkitAudioContext;
+          const ctx = new Ctx();
+          const decoded = await ctx.decodeAudioData(buf);
+          audioDurationSec = decoded.duration;
+          await ctx.close();
+        } catch {
+          /* fallback to 10s */
+        }
+        const r = await fetch("/api/lipsync/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            imageUrl: job.avatar.imageUrl,
+            audioUrl: job.avatar.voClipUrl,
+            prompt:
+              job.avatar.lipsyncPrompt ||
+              "Locked gaze: he maintains direct eye contact with the camera for the entire clip, never glancing to the side. The video plan must not move; it must remain fixed.",
+            modelKey: "kling-avatars-2",
+            qualityLabel: job.avatar.lipsyncQuality || "Pro",
+            audioDurationSec,
+          }),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+        startLsPolling(job.id, data.batch_id, job.briefId, job.hookId, job.avatar.id);
+      } catch (e) {
+        setLipsyncState((s) => {
+          const nm = new Map(s);
+          nm.set(job.id, { status: "error", error: e instanceof Error ? e.message : String(e) });
+          return nm;
+        });
+      }
+    },
+    [startLsPolling],
+  );
+
+  const runLipsyncBatch = useCallback(async () => {
+    if (lipsyncJobs.length === 0) return;
+    lsAbortRef.current?.abort();
+    const ac = new AbortController();
+    lsAbortRef.current = ac;
+    const concurrency = 3;
+    const queue = lipsyncJobs.slice();
+    const worker = async () => {
+      while (queue.length > 0 && !ac.signal.aborted) {
+        const job = queue.shift();
+        if (!job) break;
+        await runOneLipsync(job);
+      }
+    };
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  }, [lipsyncJobs, runOneLipsync]);
+
+  const cancelLipsyncBatch = useCallback(() => {
+    lsAbortRef.current?.abort();
+    // Note: in-flight polling continues — Kling jobs keep running on their side.
+  }, []);
+
+  // -----------------------------------------------------------------------
+  // Step 6 — Notion sync
   // -----------------------------------------------------------------------
 
   const syncOne = useCallback(async (brief: Brief) => {
@@ -399,7 +710,6 @@ export function BriefBatchWizard() {
 
   const syncAll = useCallback(async () => {
     const list = Array.from(briefs.values());
-    // Limit to 3 concurrent — Notion API is rate-limited at ~3 rps.
     const concurrency = 3;
     let i = 0;
     const workers = Array.from({ length: concurrency }, async () => {
@@ -412,7 +722,7 @@ export function BriefBatchWizard() {
   }, [briefs, syncOne]);
 
   // -----------------------------------------------------------------------
-  // Render
+  // Derived
   // -----------------------------------------------------------------------
 
   const committedBriefs = useMemo(
@@ -424,6 +734,16 @@ export function BriefBatchWizard() {
     [briefs, rows],
   );
 
+  const hasAvatars = useMemo(
+    () => committedBriefs.some((b) => b.avatarCount > 0),
+    [committedBriefs],
+  );
+
+  // -----------------------------------------------------------------------
+  // Step navigation
+  // -----------------------------------------------------------------------
+
+  const maxStep: StepId = 6;
   const goNext = useCallback(() => {
     if (step === 1) {
       const { ok } = commitBriefs();
@@ -431,28 +751,29 @@ export function BriefBatchWizard() {
       setStep(2);
       return;
     }
-    setStep((s) => Math.min(5, s + 1) as StepId);
+    setStep((s) => Math.min(maxStep, s + 1) as StepId);
   }, [commitBriefs, step]);
 
   const goBack = useCallback(() => {
     setStep((s) => Math.max(1, s - 1) as StepId);
   }, []);
 
-  // Auto-skip step 4 forward if no avatars
+  // Auto-skip steps 4+5 (Images / Lipsync) if no brief uses avatars.
   useEffect(() => {
-    if (step !== 4) return;
-    if (committedBriefs.length > 0 && committedBriefs.every((b) => b.avatarCount === 0)) {
-      setStep(5);
+    if ((step === 4 || step === 5) && committedBriefs.length > 0 && !hasAvatars) {
+      setStep(6);
     }
-  }, [step, committedBriefs]);
+  }, [step, committedBriefs, hasAvatars]);
+
+  // -----------------------------------------------------------------------
+  // Render
+  // -----------------------------------------------------------------------
 
   return (
-    <div className="space-y-6">
-      {/* Stepper */}
-      <Stepper step={step} onPick={setStep} hasAvatars={committedBriefs.some((b) => b.avatarCount > 0)} />
+    <div className="space-y-6 text-[15px] pb-32">
+      <Stepper step={step} onPick={setStep} hasAvatars={hasAvatars} />
 
-      {/* Body — keyed on step so React remounts and the fade re-plays. */}
-      <div key={step} className="min-h-[520px] pf-fade-in">
+      <div key={step} className="pf-fade-in min-h-[480px]">
         {step === 1 && (
           <Step1Briefs
             rows={rows}
@@ -462,7 +783,11 @@ export function BriefBatchWizard() {
           />
         )}
         {step === 2 && (
-          <Step2Scripts briefs={committedBriefs} onUpdateScript={updateHookScript} />
+          <Step2Scripts
+            briefs={committedBriefs}
+            onUpdateHook={updateHookField}
+            onUpdateBrief={updateBriefField}
+          />
         )}
         {step === 3 && (
           <Step3Voiceover
@@ -473,51 +798,75 @@ export function BriefBatchWizard() {
             voState={voState}
             onRunAll={runBatchVo}
             onCancel={cancelBatchVo}
-            onRegenerate={regenerateOne}
+            onRegenerate={regenerateVo}
+            onCutBlanks={handoffCut}
             pendingCount={voJobs.length}
           />
         )}
         {step === 4 && (
-          <Step4Avatars briefs={committedBriefs} router={router} />
+          <Step4Images briefs={committedBriefs} onOpenBrief={(id) => router.push(`/briefs/${id}`)} />
         )}
         {step === 5 && (
-          <Step5Sync briefs={committedBriefs} syncState={syncState} onSyncAll={syncAll} onSyncOne={syncOne} />
+          <Step5Lipsync
+            briefs={committedBriefs}
+            lipsyncState={lipsyncState}
+            onRunAll={runLipsyncBatch}
+            onCancel={cancelLipsyncBatch}
+            pendingCount={lipsyncJobs.length}
+            anyRunning={Array.from(lipsyncState.values()).some((s) => s.status === "running")}
+            onOpenBrief={(id) => router.push(`/briefs/${id}`)}
+          />
+        )}
+        {step === 6 && (
+          <Step6Sync
+            briefs={committedBriefs}
+            syncState={syncState}
+            onSyncAll={syncAll}
+            onSyncOne={syncOne}
+            voState={voState}
+            lipsyncState={lipsyncState}
+          />
         )}
       </div>
 
-      {/* Footer nav */}
-      <div className="sticky bottom-4 z-10 bg-pf-bg/90 backdrop-blur-md border border-pf-border rounded-xl px-4 py-3 flex items-center justify-between">
+      {/* Sticky bottom nav */}
+      <div className="sticky bottom-4 z-10 bg-pf-bg/95 backdrop-blur-md border border-pf-border rounded-2xl px-5 py-3.5 flex items-center justify-between shadow-xl shadow-black/40">
         <button
           type="button"
           onClick={goBack}
           disabled={step === 1}
-          className="inline-flex items-center gap-1.5 text-xs text-pf-dim hover:text-pf-text px-3 py-1.5 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          className="inline-flex items-center gap-2 text-sm text-pf-dim hover:text-pf-text px-3.5 py-2 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
         >
-          <ArrowLeft size={13} />
+          <ArrowLeft size={15} />
           Précédent
         </button>
 
-        <div className="text-[11px] text-pf-muted">
-          Étape {step} / 5
+        <div className="text-sm text-pf-muted">
+          Étape <span className="text-pf-text font-semibold">{step}</span> / {maxStep}
         </div>
 
-        {step < 5 ? (
+        {step < maxStep ? (
           <button
             type="button"
             onClick={goNext}
-            disabled={step === 1 && rows.every((r) => !r.briefName.trim() && !r.creativeName.trim())}
-            className="inline-flex items-center gap-1.5 bg-pf-accent text-pf-accent-fg font-semibold rounded-lg px-4 py-2 text-sm disabled:opacity-40 disabled:cursor-not-allowed hover:bg-pf-accent/90 transition-colors"
+            disabled={
+              step === 1 &&
+              rows.every((r) => !r.briefName.trim() && !r.creativeName.trim())
+            }
+            className="inline-flex items-center gap-2 bg-pf-accent text-pf-accent-fg font-bold rounded-xl px-5 py-2.5 text-sm disabled:opacity-40 disabled:cursor-not-allowed hover:bg-pf-accent/90 transition-colors"
           >
-            {step === 1 ? `Valider (${rows.filter((r) => r.briefName.trim() || r.creativeName.trim()).length})` : "Suivant"}
-            <ArrowRight size={13} />
+            {step === 1
+              ? `Valider (${rows.filter((r) => r.briefName.trim() || r.creativeName.trim()).length})`
+              : "Suivant"}
+            <ArrowRight size={15} />
           </button>
         ) : (
           <Link
             href="/briefs"
-            className="inline-flex items-center gap-1.5 bg-pf-soft border border-pf-border hover:border-pf-accent rounded-lg px-4 py-2 text-sm font-medium transition-colors"
+            className="inline-flex items-center gap-2 bg-pf-soft border border-pf-border hover:border-pf-accent rounded-xl px-5 py-2.5 text-sm font-semibold transition-colors"
           >
             Terminer
-            <Check size={13} />
+            <Check size={15} />
           </Link>
         )}
       </div>
@@ -525,9 +874,9 @@ export function BriefBatchWizard() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Stepper
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// Stepper — top tabs
+// ===========================================================================
 
 function Stepper({
   step,
@@ -540,25 +889,26 @@ function Stepper({
 }) {
   const items: { id: StepId; label: string; subtitle: string }[] = [
     { id: 1, label: "Briefs", subtitle: "Nom + créa" },
-    { id: 2, label: "Scripts", subtitle: "3 hooks par brief" },
-    { id: 3, label: "Voix off", subtitle: "Génération bulk" },
-    { id: 4, label: "Avatars", subtitle: hasAvatars ? "Par créatif" : "Skippé" },
-    { id: 5, label: "Sync", subtitle: "Push Notion" },
+    { id: 2, label: "Scripts", subtitle: "V1 + 2 hooks" },
+    { id: 3, label: "Voix off", subtitle: "Bulk + cut" },
+    { id: 4, label: "Images", subtitle: hasAvatars ? "Par avatar" : "Skippé" },
+    { id: 5, label: "Lipsync", subtitle: hasAvatars ? "Bulk Kling" : "Skippé" },
+    { id: 6, label: "Sync", subtitle: "Notion" },
   ];
   return (
-    <div className="bg-pf-elev border border-pf-border rounded-xl px-2 py-2">
+    <div className="bg-pf-elev border border-pf-border rounded-2xl px-2 py-2">
       <div className="flex items-stretch gap-1">
         {items.map((it, i) => {
           const active = step === it.id;
           const done = step > it.id;
-          const skipped = it.id === 4 && !hasAvatars;
+          const skipped = (it.id === 4 || it.id === 5) && !hasAvatars;
           return (
             <button
               key={it.id}
               type="button"
               onClick={() => onPick(it.id)}
               disabled={skipped}
-              className={`flex-1 flex items-center gap-2 px-3 py-2 rounded-md transition-colors text-left ${
+              className={`flex-1 flex items-center gap-2.5 px-3 py-2.5 rounded-xl transition-colors text-left ${
                 active
                   ? "bg-pf-accent/15 text-pf-text"
                   : done
@@ -569,7 +919,7 @@ function Stepper({
               }`}
             >
               <span
-                className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${
+                className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold shrink-0 ${
                   active
                     ? "bg-pf-accent text-pf-accent-fg"
                     : done
@@ -577,13 +927,11 @@ function Stepper({
                       : "bg-pf-soft border border-pf-border text-pf-muted"
                 }`}
               >
-                {done ? <Check size={12} /> : i + 1}
+                {done ? <Check size={14} /> : i + 1}
               </span>
-              <div className="min-w-0 hidden sm:block">
-                <div className="text-xs font-semibold leading-tight truncate">{it.label}</div>
-                <div className="text-[10px] text-pf-muted leading-tight truncate">
-                  {it.subtitle}
-                </div>
+              <div className="min-w-0 hidden md:block">
+                <div className="text-sm font-semibold leading-tight truncate">{it.label}</div>
+                <div className="text-xs text-pf-muted leading-tight truncate">{it.subtitle}</div>
               </div>
             </button>
           );
@@ -593,9 +941,9 @@ function Stepper({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Step 1 — Briefs
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// Step 1 — Briefs (multi-add)
+// ===========================================================================
 
 function Step1Briefs({
   rows,
@@ -608,18 +956,17 @@ function Step1Briefs({
   onRemove: (id: string) => void;
   onPatch: (id: string, patch: Partial<DraftRow>) => void;
 }) {
-  // Tab from the last input of the last row should add a new row.
   const lastCreativeRef = useRef<HTMLInputElement>(null);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <Intro
         title="Liste tes briefs pour la semaine"
-        body="Une ligne = un brief = 3 hooks. Le nom du brief (ex. « Ad Test #12 ») + le nom de la créa (ex. « Anti-Fake Dermato ») formeront le titre du brief. Le nombre d'avatars est facultatif (0 = pas d'avatar IA)."
+        body="Une ligne = un brief = 3 vidéos (V1 + 2 hooks). Le nom du brief + le nom de la créa formeront le titre. Avatars IA : 0 si pas besoin."
       />
 
-      <div className="bg-pf-elev border border-pf-border rounded-xl divide-y divide-pf-border overflow-hidden">
-        <div className="grid grid-cols-[1fr_1.4fr_120px_42px] gap-3 px-4 py-2.5 bg-pf-soft text-[10px] uppercase tracking-wider text-pf-muted font-semibold">
+      <div className="bg-pf-elev border border-pf-border rounded-2xl divide-y divide-pf-border overflow-hidden">
+        <div className="grid grid-cols-[1fr_1.4fr_140px_48px] gap-4 px-5 py-3 bg-pf-soft text-xs uppercase tracking-wider text-pf-muted font-bold">
           <span>Nom du brief</span>
           <span>Nom de la créa</span>
           <span>Avatars IA</span>
@@ -630,14 +977,14 @@ function Step1Briefs({
           return (
             <div
               key={r.rowId}
-              className="grid grid-cols-[1fr_1.4fr_120px_42px] gap-3 px-4 py-2.5 items-center"
+              className="grid grid-cols-[1fr_1.4fr_140px_48px] gap-4 px-5 py-3 items-center"
             >
               <input
                 type="text"
                 value={r.briefName}
                 onChange={(e) => onPatch(r.rowId, { briefName: e.target.value })}
                 placeholder={`Ad Test #${i + 1}`}
-                className="bg-pf-bg border border-pf-border rounded-md px-2.5 py-1.5 text-sm focus:outline-none focus:border-pf-accent"
+                className="bg-pf-bg border border-pf-border rounded-lg px-3 py-2.5 text-base focus:outline-none focus:border-pf-accent"
               />
               <input
                 ref={isLast ? lastCreativeRef : undefined}
@@ -652,7 +999,7 @@ function Step1Briefs({
                   }
                 }}
                 placeholder="Anti-Fake Dermato"
-                className="bg-pf-bg border border-pf-border rounded-md px-2.5 py-1.5 text-sm focus:outline-none focus:border-pf-accent"
+                className="bg-pf-bg border border-pf-border rounded-lg px-3 py-2.5 text-base focus:outline-none focus:border-pf-accent"
               />
               <AvatarCountPicker
                 value={r.avatarCount}
@@ -661,10 +1008,10 @@ function Step1Briefs({
               <button
                 type="button"
                 onClick={() => onRemove(r.rowId)}
-                className="text-pf-muted hover:text-pf-danger w-8 h-8 rounded-md flex items-center justify-center hover:bg-pf-soft transition-colors"
+                className="text-pf-muted hover:text-pf-danger w-10 h-10 rounded-lg flex items-center justify-center hover:bg-pf-soft transition-colors"
                 aria-label="Retirer la ligne"
               >
-                <X size={14} />
+                <X size={16} />
               </button>
             </div>
           );
@@ -674,15 +1021,18 @@ function Step1Briefs({
       <button
         type="button"
         onClick={onAdd}
-        className="w-full bg-pf-elev border border-dashed border-pf-border hover:border-pf-accent rounded-xl px-4 py-3 text-sm text-pf-dim hover:text-pf-text flex items-center justify-center gap-1.5 transition-colors"
+        className="w-full bg-pf-elev border border-dashed border-pf-border hover:border-pf-accent rounded-2xl px-4 py-4 text-base text-pf-dim hover:text-pf-text flex items-center justify-center gap-2 transition-colors"
       >
-        <Plus size={14} />
+        <Plus size={16} />
         Ajouter un brief
       </button>
 
-      <div className="text-[11px] text-pf-muted text-center">
-        Astuce : <kbd className="px-1.5 py-0.5 bg-pf-soft border border-pf-border rounded text-[10px]">Entrée</kbd> dans
-        le champ « créa » ajoute automatiquement une nouvelle ligne.
+      <div className="text-sm text-pf-muted text-center">
+        Astuce :{" "}
+        <kbd className="px-2 py-0.5 bg-pf-soft border border-pf-border rounded text-xs">
+          Entrée
+        </kbd>{" "}
+        dans le champ « créa » ajoute automatiquement une nouvelle ligne.
       </div>
     </div>
   );
@@ -696,21 +1046,21 @@ function AvatarCountPicker({
   onChange: (n: number) => void;
 }) {
   return (
-    <div className="flex items-center gap-1 bg-pf-bg border border-pf-border rounded-md p-0.5">
+    <div className="flex items-center gap-1 bg-pf-bg border border-pf-border rounded-lg p-1">
       <button
         type="button"
         onClick={() => onChange(Math.max(0, value - 1))}
-        className="w-6 h-6 rounded text-pf-muted hover:text-pf-text hover:bg-pf-soft flex items-center justify-center"
+        className="w-8 h-8 rounded-md text-pf-muted hover:text-pf-text hover:bg-pf-soft flex items-center justify-center text-lg"
       >
         −
       </button>
-      <span className="font-mono text-sm font-semibold w-6 text-center text-pf-text">
+      <span className="font-mono text-lg font-bold w-8 text-center text-pf-text">
         {value}
       </span>
       <button
         type="button"
         onClick={() => onChange(Math.min(5, value + 1))}
-        className="w-6 h-6 rounded text-pf-muted hover:text-pf-text hover:bg-pf-soft flex items-center justify-center"
+        className="w-8 h-8 rounded-md text-pf-muted hover:text-pf-text hover:bg-pf-soft flex items-center justify-center text-lg"
       >
         +
       </button>
@@ -718,111 +1068,163 @@ function AvatarCountPicker({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Step 2 — Scripts (accordion of briefs, only one open at a time)
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// Step 2 — Scripts + optional notes + creative ref
+// ===========================================================================
 
 function Step2Scripts({
   briefs,
-  onUpdateScript,
+  onUpdateHook,
+  onUpdateBrief,
 }: {
   briefs: Brief[];
-  onUpdateScript: (briefId: string, hookId: string, value: string) => void;
+  onUpdateHook: (briefId: string, hookId: string, patch: { hookScript?: string; notes?: string }) => void;
+  onUpdateBrief: (briefId: string, patch: { creativeRef?: string; notes?: string }) => void;
 }) {
   const [openId, setOpenId] = useState<string | null>(briefs[0]?.id ?? null);
-
-  // Local script state — flushed to parent on blur to avoid re-renders per keystroke.
   const [drafts, setDrafts] = useState<Record<string, string>>(() => {
     const o: Record<string, string> = {};
-    for (const b of briefs) for (const h of b.hooks) o[`${b.id}:${h.id}`] = h.hookScript;
+    for (const b of briefs) {
+      for (const h of b.hooks) o[`${b.id}:${h.id}:script`] = h.hookScript;
+      for (const h of b.hooks) o[`${b.id}:${h.id}:notes`] = h.notes ?? "";
+      o[`${b.id}:ref`] = b.creativeRef ?? "";
+    }
     return o;
   });
+  const [notesOpen, setNotesOpen] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
-    // Hydrate drafts when briefs change (e.g. step navigation).
     setDrafts((prev) => {
       const next = { ...prev };
       for (const b of briefs) {
         for (const h of b.hooks) {
-          const key = `${b.id}:${h.id}`;
-          if (next[key] === undefined) next[key] = h.hookScript;
+          const k1 = `${b.id}:${h.id}:script`;
+          const k2 = `${b.id}:${h.id}:notes`;
+          if (next[k1] === undefined) next[k1] = h.hookScript;
+          if (next[k2] === undefined) next[k2] = h.notes ?? "";
         }
+        const k3 = `${b.id}:ref`;
+        if (next[k3] === undefined) next[k3] = b.creativeRef ?? "";
       }
       return next;
     });
   }, [briefs]);
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       <Intro
         title="Saisis les 3 scripts par brief"
-        body="Chaque brief a 3 hooks : V1 (la version originale, script complet) puis Hook 2 et Hook 3 (variations du hook d'ouverture). Tu peux ouvrir un brief à la fois pour rester concentré."
+        body="V1 = la version originale (script complet). Hook 2 + Hook 3 = juste l'accroche d'ouverture. Tu peux ajouter une note monteur ou une créa de référence (facultatif)."
       />
 
       {briefs.map((b) => {
         const open = openId === b.id;
-        const filled = b.hooks.every((h) => drafts[`${b.id}:${h.id}`]?.trim());
+        const filled = b.hooks.every((h) => drafts[`${b.id}:${h.id}:script`]?.trim());
         return (
           <div
             key={b.id}
-            className={`bg-pf-elev border rounded-xl overflow-hidden transition-colors ${
+            className={`bg-pf-elev border rounded-2xl overflow-hidden transition-colors ${
               open ? "border-pf-accent" : "border-pf-border"
             }`}
           >
             <button
               type="button"
               onClick={() => setOpenId(open ? null : b.id)}
-              className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-pf-soft transition-colors"
+              className="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-pf-soft transition-colors"
             >
-              <div className="flex items-center gap-2.5 min-w-0">
+              <div className="flex items-center gap-3 min-w-0">
                 {open ? (
-                  <ChevronDown size={16} className="text-pf-accent shrink-0" />
+                  <ChevronDown size={18} className="text-pf-accent shrink-0" />
                 ) : (
-                  <ChevronRight size={16} className="text-pf-muted shrink-0" />
+                  <ChevronRight size={18} className="text-pf-muted shrink-0" />
                 )}
                 <div className="min-w-0">
-                  <div className="text-sm font-semibold truncate">{b.adsetName}</div>
-                  <div className="text-[11px] text-pf-muted font-mono">
-                    {b.hooks.filter((h) => drafts[`${b.id}:${h.id}`]?.trim()).length} / 3 scripts
+                  <div className="text-base font-bold truncate">{b.adsetName}</div>
+                  <div className="text-sm text-pf-muted font-mono">
+                    {b.hooks.filter((h) => drafts[`${b.id}:${h.id}:script`]?.trim()).length} / 3 scripts
                   </div>
                 </div>
               </div>
-              {filled && (
-                <span className="text-[10px] font-bold uppercase tracking-wider bg-pf-ok/20 text-pf-ok rounded px-1.5 py-0.5 shrink-0">
-                  ✓ Complet
-                </span>
-              )}
+              {filled && <BadgeOK label="Complet" />}
             </button>
 
             {open && (
-              <div className="border-t border-pf-border px-4 py-4 space-y-3">
+              <div className="border-t border-pf-border px-5 py-5 space-y-5">
                 {b.hooks.map((h) => {
-                  const key = `${b.id}:${h.id}`;
-                  const label = h.index === 1 ? "V1 (Original — script complet)" : `Hook ${h.index} (variation d'ouverture)`;
+                  const sk = `${b.id}:${h.id}:script`;
+                  const nk = `${b.id}:${h.id}:notes`;
+                  const nKey = `${b.id}:${h.id}`;
+                  const showNotes = notesOpen[nKey] ?? !!drafts[nk]?.trim();
+                  const label =
+                    h.index === 1
+                      ? "V1 — Original (script complet)"
+                      : `Hook ${h.index} — Variation d'ouverture`;
                   return (
-                    <div key={h.id}>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <label className="text-[11px] uppercase tracking-wider text-pf-muted font-semibold">
+                    <div key={h.id} className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-bold uppercase tracking-wider text-pf-muted">
                           {label}
                         </label>
-                        <span className="text-[10px] text-pf-muted font-mono">
-                          {(drafts[key] ?? "").length} chars
+                        <span className="text-xs text-pf-muted font-mono">
+                          {(drafts[sk] ?? "").length} chars
                         </span>
                       </div>
                       <textarea
-                        value={drafts[key] ?? ""}
-                        onChange={(e) => setDrafts((d) => ({ ...d, [key]: e.target.value }))}
-                        onBlur={() => onUpdateScript(b.id, h.id, drafts[key] ?? "")}
-                        placeholder={h.index === 1
-                          ? "Écris le script complet (3-30s de VO)…"
-                          : "Variation du hook seule (1-3 phrases). Le reste du script reste celui de V1."
+                        value={drafts[sk] ?? ""}
+                        onChange={(e) =>
+                          setDrafts((d) => ({ ...d, [sk]: e.target.value }))
+                        }
+                        onBlur={() => onUpdateHook(b.id, h.id, { hookScript: drafts[sk] ?? "" })}
+                        placeholder={
+                          h.index === 1
+                            ? "Écris le script complet (3-30s de VO)…"
+                            : "Variation du hook seule (1-3 phrases)."
                         }
                         rows={h.index === 1 ? 6 : 3}
-                        className="w-full bg-pf-bg border border-pf-border rounded-md px-3 py-2 text-sm focus:outline-none focus:border-pf-accent leading-relaxed resize-y"
+                        className="w-full bg-pf-bg border border-pf-border rounded-xl px-4 py-3 text-base focus:outline-none focus:border-pf-accent leading-relaxed resize-y"
                       />
+                      <button
+                        type="button"
+                        onClick={() => setNotesOpen((m) => ({ ...m, [nKey]: !showNotes }))}
+                        className="text-xs text-pf-muted hover:text-pf-text inline-flex items-center gap-1"
+                      >
+                        {showNotes ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                        Note monteur {showNotes ? "" : "(optionnelle)"}
+                      </button>
+                      {showNotes && (
+                        <textarea
+                          value={drafts[nk] ?? ""}
+                          onChange={(e) =>
+                            setDrafts((d) => ({ ...d, [nk]: e.target.value }))
+                          }
+                          onBlur={() => onUpdateHook(b.id, h.id, { notes: drafts[nk] ?? "" })}
+                          placeholder="Indications de montage spécifiques à ce hook (b-rolls, overlay, rythme…)"
+                          rows={2}
+                          className="w-full bg-pf-bg border border-pf-border rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-pf-accent leading-relaxed resize-y italic"
+                        />
+                      )}
                     </div>
                   );
                 })}
+
+                {/* Per-brief creative ref */}
+                <div className="pt-3 border-t border-pf-border space-y-2">
+                  <label className="text-sm font-bold uppercase tracking-wider text-pf-muted">
+                    Créa de référence (optionnelle)
+                  </label>
+                  <input
+                    type="url"
+                    value={drafts[`${b.id}:ref`] ?? ""}
+                    onChange={(e) =>
+                      setDrafts((d) => ({ ...d, [`${b.id}:ref`]: e.target.value }))
+                    }
+                    onBlur={() =>
+                      onUpdateBrief(b.id, { creativeRef: drafts[`${b.id}:ref`] ?? "" })
+                    }
+                    placeholder="URL de la créa concurrente à répliquer (Facebook Ads Library, TikTok, etc.)"
+                    className="w-full bg-pf-bg border border-pf-border rounded-xl px-4 py-2.5 text-base focus:outline-none focus:border-pf-accent"
+                  />
+                </div>
               </div>
             )}
           </div>
@@ -832,9 +1234,9 @@ function Step2Scripts({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Step 3 — Voice-over batch
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// Step 3 — Voice-over — CARD PER BRIEF (V1 / H2 / H3 inside)
+// ===========================================================================
 
 function Step3Voiceover({
   briefs,
@@ -845,6 +1247,7 @@ function Step3Voiceover({
   onRunAll,
   onCancel,
   onRegenerate,
+  onCutBlanks,
   pendingCount,
 }: {
   briefs: Brief[];
@@ -855,9 +1258,9 @@ function Step3Voiceover({
   onRunAll: () => void;
   onCancel: () => void;
   onRegenerate: (briefId: string, hookId: string) => void;
+  onCutBlanks: (briefId: string, hookId: string, audioUrl: string) => void;
   pendingCount: number;
 }) {
-  // Aggregate counts
   const totals = useMemo(() => {
     let total = 0,
       done = 0,
@@ -876,26 +1279,26 @@ function Step3Voiceover({
     return { total, done, running, error };
   }, [briefs, voState]);
 
-  const allDone = totals.total > 0 && totals.done === totals.total;
   const anyRunning = totals.running > 0;
+  const allDone = totals.total > 0 && totals.done === totals.total;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <Intro
-        title="Génère toutes les voix off en parallèle"
-        body="Une voix par défaut s'applique à tout le batch. Tu peux relancer une ligne avec une autre voix si besoin. Le résultat est écrit directement dans le brief (cutVo)."
+        title="Génère toutes les voix off"
+        body="Une voix par défaut s'applique à tout le batch. Le résultat brut est écrit dans le brief. Pour les hooks qui en ont besoin, clique « ✂ Cut blanks » pour ouvrir le studio et nettoyer les silences."
       />
 
       {/* Top control bar */}
-      <div className="bg-pf-elev border border-pf-border rounded-xl px-4 py-3 flex flex-wrap items-center gap-3">
-        <div className="flex items-center gap-2 flex-1 min-w-[220px]">
-          <Mic size={14} className="text-pf-accent" />
+      <div className="bg-pf-elev border border-pf-border rounded-2xl px-5 py-4 flex flex-wrap items-center gap-4">
+        <div className="flex items-center gap-2.5 flex-1 min-w-[240px]">
+          <Mic size={18} className="text-pf-accent" />
           <select
             value={voiceId}
             onChange={(e) => onVoiceChange(e.target.value)}
-            className="flex-1 bg-pf-bg border border-pf-border rounded-md px-2.5 py-1.5 text-sm focus:outline-none focus:border-pf-accent"
+            className="flex-1 bg-pf-bg border border-pf-border rounded-lg px-3 py-2.5 text-base focus:outline-none focus:border-pf-accent"
           >
-            {voices.length === 0 && <option value="">— Chargement des voix —</option>}
+            {voices.length === 0 && <option value="">— Chargement —</option>}
             {voices.map((v) => (
               <option key={v.voiceId} value={v.voiceId}>
                 {v.name}
@@ -905,19 +1308,21 @@ function Step3Voiceover({
           </select>
         </div>
 
-        <div className="flex items-center gap-1.5 text-xs">
+        <div className="flex items-center gap-2 text-sm">
           <Pill label={`${totals.done} / ${totals.total} done`} tone={allDone ? "ok" : "neutral"} />
           {anyRunning && <Pill label={`${totals.running} en cours`} tone="run" />}
-          {totals.error > 0 && <Pill label={`${totals.error} erreur${totals.error > 1 ? "s" : ""}`} tone="err" />}
+          {totals.error > 0 && (
+            <Pill label={`${totals.error} erreur${totals.error > 1 ? "s" : ""}`} tone="err" />
+          )}
         </div>
 
         {anyRunning ? (
           <button
             type="button"
             onClick={onCancel}
-            className="bg-pf-soft border border-pf-border hover:border-pf-danger text-pf-text hover:text-pf-danger rounded-md px-3 py-1.5 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
+            className="bg-pf-soft border border-pf-border hover:border-pf-danger text-pf-text hover:text-pf-danger rounded-lg px-4 py-2.5 text-sm font-semibold inline-flex items-center gap-2 transition-colors"
           >
-            <Pause size={12} />
+            <Pause size={14} />
             Annuler
           </button>
         ) : (
@@ -925,174 +1330,206 @@ function Step3Voiceover({
             type="button"
             onClick={onRunAll}
             disabled={pendingCount === 0}
-            className="bg-pf-accent text-pf-accent-fg font-semibold rounded-md px-4 py-1.5 text-xs inline-flex items-center gap-1.5 disabled:opacity-40 hover:bg-pf-accent/90 transition-colors"
+            className="bg-pf-accent text-pf-accent-fg font-bold rounded-lg px-5 py-2.5 text-sm inline-flex items-center gap-2 disabled:opacity-40 hover:bg-pf-accent/90 transition-colors"
           >
-            <Sparkles size={12} />
-            {pendingCount === 0 ? "Tout est généré" : `Générer ${pendingCount}`}
+            <Sparkles size={14} />
+            {pendingCount === 0 ? "Tout est généré ✓" : `Générer les ${pendingCount} voix off`}
           </button>
         )}
       </div>
 
-      {/* Rows */}
-      <div className="bg-pf-elev border border-pf-border rounded-xl overflow-hidden">
-        <div className="grid grid-cols-[1.6fr_72px_1fr_180px_120px] gap-3 px-4 py-2.5 bg-pf-soft text-[10px] uppercase tracking-wider text-pf-muted font-semibold border-b border-pf-border">
-          <span>Brief</span>
-          <span>Hook</span>
-          <span>Statut</span>
-          <span>Player</span>
-          <span className="text-right">Action</span>
-        </div>
-        <div className="divide-y divide-pf-border">
-          {briefs.length === 0 && (
-            <div className="px-4 py-6 text-center text-xs text-pf-muted">
-              Aucun brief avec un script. Reviens à l&apos;étape 2.
-            </div>
-          )}
-          {briefs.map((b) =>
-            b.hooks.map((h) => {
-              if (!h.hookScript.trim()) return null;
-              const key = `${b.id}:${h.id}`;
-              const s = voState.get(key);
-              const url = s?.url || h.cutVoUrl;
-              const status: VoCellStatus = s?.status ?? (url ? "done" : "idle");
-              const hookLabel = h.index === 1 ? "V1" : `H${h.index}`;
-              return (
-                <div
-                  key={key}
-                  className="grid grid-cols-[1.6fr_72px_1fr_180px_120px] gap-3 px-4 py-2.5 items-center text-xs"
-                >
+      {/* Brief cards */}
+      <div className="space-y-3">
+        {briefs.length === 0 && (
+          <div className="bg-pf-elev border border-pf-border rounded-2xl px-5 py-10 text-center text-pf-muted">
+            Aucun brief avec un script. Reviens à l&apos;étape 2.
+          </div>
+        )}
+
+        {briefs.map((b) => {
+          const hookRows = b.hooks.filter((h) => h.hookScript.trim());
+          if (hookRows.length === 0) return null;
+          const doneCount = hookRows.filter(
+            (h) =>
+              h.cutVoUrl || voState.get(`${b.id}:${h.id}`)?.status === "done",
+          ).length;
+          const allDoneInBrief = doneCount === hookRows.length;
+          return (
+            <div
+              key={b.id}
+              className={`bg-pf-elev border rounded-2xl overflow-hidden ${
+                allDoneInBrief ? "border-pf-ok/40" : "border-pf-border"
+              }`}
+            >
+              <div className="flex items-center justify-between px-5 py-3.5 border-b border-pf-border bg-pf-soft/40">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-9 h-9 rounded-lg bg-pf-accent/15 border border-pf-accent/30 text-pf-accent flex items-center justify-center shrink-0">
+                    <Mic size={16} />
+                  </div>
                   <div className="min-w-0">
-                    <div className="text-sm font-medium truncate">{b.adsetName}</div>
-                    <div className="text-[10px] text-pf-muted line-clamp-1">
-                      {h.hookScript.slice(0, 80)}
-                      {h.hookScript.length > 80 ? "…" : ""}
+                    <div className="text-base font-bold truncate">{b.adsetName}</div>
+                    <div className="text-sm text-pf-muted font-mono">
+                      {doneCount} / {hookRows.length} voix off
                     </div>
                   </div>
-                  <span className="text-pf-text font-semibold font-mono">{hookLabel}</span>
-                  <StatusCell status={status} error={s?.error} />
-                  <div>
-                    {url ? (
-                      // eslint-disable-next-line jsx-a11y/media-has-caption
-                      <audio controls src={url} className="w-full h-7" />
-                    ) : (
-                      <span className="text-pf-muted">—</span>
-                    )}
-                  </div>
-                  <div className="text-right">
-                    <button
-                      type="button"
-                      onClick={() => onRegenerate(b.id, h.id)}
-                      disabled={status === "running"}
-                      className="inline-flex items-center gap-1 text-pf-dim hover:text-pf-accent border border-pf-border hover:border-pf-accent rounded-md px-2 py-1 text-[11px] disabled:opacity-40 transition-colors"
-                    >
-                      {status === "running" ? (
-                        <Loader2 size={11} className="animate-spin" />
-                      ) : (
-                        <RefreshCw size={11} />
-                      )}
-                      {url ? "Re-gen" : "Gen"}
-                    </button>
-                  </div>
                 </div>
-              );
-            }),
-          )}
-        </div>
+                {allDoneInBrief && <BadgeOK label="Complet" />}
+              </div>
+
+              <div className="divide-y divide-pf-border">
+                {hookRows.map((h) => {
+                  const key = `${b.id}:${h.id}`;
+                  const s = voState.get(key);
+                  const url = s?.url || h.cutVoUrl;
+                  const status: VoCellStatus = s?.status ?? (url ? "done" : "idle");
+                  const hookLabel = h.index === 1 ? "V1" : `Hook ${h.index}`;
+                  return (
+                    <div key={key} className="grid grid-cols-[80px_1fr] gap-4 px-5 py-4 items-center">
+                      <div className="flex items-center gap-2">
+                        <span className="text-base font-bold font-mono text-pf-text bg-pf-soft border border-pf-border rounded-md px-2.5 py-1">
+                          {hookLabel}
+                        </span>
+                      </div>
+                      <div className="space-y-2 min-w-0">
+                        <div className="flex items-center justify-between gap-3 flex-wrap">
+                          <StatusBadge status={status} error={s?.error} />
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => onRegenerate(b.id, h.id)}
+                              disabled={status === "running"}
+                              className="inline-flex items-center gap-1.5 text-sm text-pf-dim hover:text-pf-accent border border-pf-border hover:border-pf-accent rounded-lg px-3 py-1.5 disabled:opacity-40 transition-colors"
+                            >
+                              {status === "running" ? (
+                                <Loader2 size={13} className="animate-spin" />
+                              ) : (
+                                <RefreshCw size={13} />
+                              )}
+                              {url ? "Re-gen" : "Gen"}
+                            </button>
+                            {url && (
+                              <button
+                                type="button"
+                                onClick={() => onCutBlanks(b.id, h.id, url)}
+                                className="inline-flex items-center gap-1.5 text-sm font-semibold bg-pf-accent/15 border border-pf-accent/40 text-pf-accent hover:bg-pf-accent/25 rounded-lg px-3 py-1.5 transition-colors"
+                                title="Ouvrir Cut Silence avec cet audio préchargé"
+                              >
+                                <Scissors size={13} />
+                                Cut blanks
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        {url ? (
+                          // eslint-disable-next-line jsx-a11y/media-has-caption
+                          <audio controls src={url} className="w-full h-9" />
+                        ) : (
+                          <p className="text-sm text-pf-muted line-clamp-2 leading-relaxed">
+                            {h.hookScript.slice(0, 120)}
+                            {h.hookScript.length > 120 ? "…" : ""}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
 }
 
-function StatusCell({ status, error }: { status: VoCellStatus; error?: string }) {
-  if (status === "done") {
-    return (
-      <span className="inline-flex items-center gap-1 text-pf-ok">
-        <Check size={12} className="pf-success-pop" />
-        Done
-      </span>
-    );
-  }
-  if (status === "running") {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-pf-warn">
-        <span className="w-1.5 h-1.5 rounded-full bg-pf-warn pf-pulse-dot inline-block" />
-        En cours…
-      </span>
-    );
-  }
-  if (status === "error") {
-    return (
-      <span className="inline-flex items-center gap-1 text-pf-danger" title={error}>
-        <X size={12} />
-        Erreur
-      </span>
-    );
-  }
-  return <span className="text-pf-muted">Idle</span>;
-}
+// ===========================================================================
+// Step 4 — Images (per-brief progress + open in wizard)
+// ===========================================================================
 
-// ---------------------------------------------------------------------------
-// Step 4 — Avatars (per-brief deep-link to the existing wizard)
-// ---------------------------------------------------------------------------
-
-type Router = ReturnType<typeof useRouter>;
-
-function Step4Avatars({ briefs, router }: { briefs: Brief[]; router: Router }) {
+function Step4Images({
+  briefs,
+  onOpenBrief,
+}: {
+  briefs: Brief[];
+  onOpenBrief: (id: string) => void;
+}) {
   const withAvatars = briefs.filter((b) => b.avatarCount > 0);
+
   if (withAvatars.length === 0) {
     return (
-      <div className="bg-pf-elev border border-pf-border rounded-xl p-8 text-center">
-        <Sparkles size={28} className="mx-auto text-pf-accent mb-3" />
-        <h3 className="text-base font-semibold mb-1">Aucun brief avec avatar IA</h3>
-        <p className="text-xs text-pf-dim max-w-md mx-auto">
-          Tu as choisi 0 avatar pour tous les briefs de ce batch. On passe directement à la sync.
+      <div className="bg-pf-elev border border-pf-border rounded-2xl p-10 text-center">
+        <Sparkles size={32} className="mx-auto text-pf-accent mb-4" />
+        <h3 className="text-lg font-bold mb-2">Aucun brief avec avatar IA</h3>
+        <p className="text-sm text-pf-dim max-w-md mx-auto">
+          Tu as choisi 0 avatar pour tous les briefs. On passe directement au sync.
         </p>
       </div>
     );
   }
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <Intro
-        title="Configure les avatars (créa par créa)"
-        body="Les avatars sont l'étape la plus chirurgicale : image de référence, prompt lipsync, validation par hook. On ouvre le wizard fine d'un brief à la fois."
+        title="Assigne une image à chaque avatar"
+        body="Génère tes images dans Prompts ou Image, puis utilise « 📎 Rattacher au brief » sur chaque image pour la coller sur le bon avatar. Clique « Ouvrir » pour configurer les avatars d'un brief en détail."
       />
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+
+      <div className="flex flex-wrap items-center gap-3">
+        <Link
+          href="/prompts"
+          target="_blank"
+          className="inline-flex items-center gap-2 bg-pf-soft border border-pf-border hover:border-pf-accent rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors"
+        >
+          <ImageIcon size={15} />
+          Générer des images (Prompts)
+          <ExternalLink size={12} className="text-pf-muted" />
+        </Link>
+        <span className="text-sm text-pf-muted">
+          Astuce : clique « 📎 Rattacher au brief » sur chaque image générée.
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {withAvatars.map((b) => {
           const totalSlots = b.avatarCount * 3;
-          const doneSlots = b.hooks.reduce(
-            (acc, h) =>
-              acc + h.avatars.filter((a) => a.lipsyncStatus === "done" && a.lipsyncVideoUrl).length,
+          const imagesAssigned = b.hooks.reduce(
+            (acc, h) => acc + h.avatars.filter((a) => a.imageUrl).length,
             0,
           );
-          const pct = totalSlots === 0 ? 0 : Math.round((doneSlots / totalSlots) * 100);
+          const voAssigned = b.hooks.reduce(
+            (acc, h) => acc + h.avatars.filter((a) => a.voClipUrl).length,
+            0,
+          );
+          const pct = totalSlots === 0 ? 0 : Math.round((imagesAssigned / totalSlots) * 100);
+          const allReady = imagesAssigned === totalSlots && voAssigned === totalSlots;
           return (
             <button
               key={b.id}
               type="button"
-              onClick={() => router.push(`/briefs/${b.id}`)}
-              className="text-left bg-pf-elev border border-pf-border hover:border-pf-accent rounded-xl p-4 transition-colors group"
+              onClick={() => onOpenBrief(b.id)}
+              className={`text-left bg-pf-elev border rounded-2xl p-5 transition-colors group ${
+                allReady ? "border-pf-ok/40 hover:border-pf-ok" : "border-pf-border hover:border-pf-accent"
+              }`}
             >
-              <div className="flex items-start justify-between mb-2">
-                <div className="w-9 h-9 rounded-md bg-pf-accent/15 border border-pf-accent/30 text-pf-accent flex items-center justify-center">
-                  <Users size={15} />
+              <div className="flex items-start justify-between mb-3">
+                <div className="w-11 h-11 rounded-xl bg-pf-accent/15 border border-pf-accent/30 text-pf-accent flex items-center justify-center">
+                  <Users size={18} />
                 </div>
-                <span className="text-[10px] text-pf-muted font-mono">
-                  {doneSlots}/{totalSlots}
-                </span>
+                {allReady ? <BadgeOK label="Complet" /> : <Pill label={`${pct}%`} tone="neutral" />}
               </div>
-              <div className="text-sm font-semibold truncate">{b.adsetName}</div>
-              <div className="text-[11px] text-pf-muted font-mono mt-0.5">
-                3 hooks × {b.avatarCount} avatars
+              <div className="text-base font-bold truncate">{b.adsetName}</div>
+              <div className="text-sm text-pf-muted font-mono mt-1">
+                3 hooks × {b.avatarCount} avatar{b.avatarCount > 1 ? "s" : ""}
               </div>
-              <div className="mt-3 h-1 bg-pf-soft rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-pf-accent transition-all"
-                  style={{ width: `${pct}%` }}
-                />
+
+              <div className="mt-4 space-y-1.5">
+                <ChecklineRow label="Images" done={imagesAssigned} total={totalSlots} />
+                <ChecklineRow label="Voix off avatar" done={voAssigned} total={totalSlots} />
               </div>
-              <div className="mt-3 text-[11px] text-pf-accent font-semibold flex items-center gap-1">
-                Configurer
-                <ArrowRight size={12} className="group-hover:translate-x-0.5 transition-transform" />
+
+              <div className="mt-4 text-sm text-pf-accent font-semibold flex items-center gap-1.5">
+                Ouvrir
+                <ArrowRight size={13} className="group-hover:translate-x-0.5 transition-transform" />
               </div>
             </button>
           );
@@ -1102,23 +1539,243 @@ function Step4Avatars({ briefs, router }: { briefs: Brief[]; router: Router }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Step 5 — Sync
-// ---------------------------------------------------------------------------
+function ChecklineRow({ label, done, total }: { label: string; done: number; total: number }) {
+  const ok = done === total && total > 0;
+  return (
+    <div className="flex items-center justify-between text-sm">
+      <span className="text-pf-dim">{label}</span>
+      <span className={`font-mono ${ok ? "text-pf-ok" : "text-pf-muted"}`}>
+        {done} / {total}
+        {ok && " ✓"}
+      </span>
+    </div>
+  );
+}
 
-function Step5Sync({
+// ===========================================================================
+// Step 5 — Lipsync (batch with Kling polling)
+// ===========================================================================
+
+function Step5Lipsync({
+  briefs,
+  lipsyncState,
+  onRunAll,
+  onCancel,
+  pendingCount,
+  anyRunning,
+  onOpenBrief,
+}: {
+  briefs: Brief[];
+  lipsyncState: Map<string, LsCellState>;
+  onRunAll: () => void;
+  onCancel: () => void;
+  pendingCount: number;
+  anyRunning: boolean;
+  onOpenBrief: (id: string) => void;
+}) {
+  const withAvatars = briefs.filter((b) => b.avatarCount > 0);
+
+  const totals = useMemo(() => {
+    let total = 0,
+      done = 0,
+      running = 0,
+      error = 0,
+      notReady = 0;
+    for (const b of withAvatars) {
+      for (const h of b.hooks) {
+        for (const av of h.avatars) {
+          total++;
+          if (av.lipsyncStatus === "done" && av.lipsyncVideoUrl) {
+            done++;
+            continue;
+          }
+          if (!av.imageUrl || !av.voClipUrl) {
+            notReady++;
+            continue;
+          }
+          const s = lipsyncState.get(`${b.id}:${h.id}:${av.id}`);
+          if (s?.status === "running") running++;
+          else if (s?.status === "error") error++;
+        }
+      }
+    }
+    return { total, done, running, error, notReady };
+  }, [withAvatars, lipsyncState]);
+
+  if (withAvatars.length === 0) {
+    return (
+      <div className="bg-pf-elev border border-pf-border rounded-2xl p-10 text-center">
+        <Video size={32} className="mx-auto text-pf-accent mb-4" />
+        <h3 className="text-lg font-bold mb-2">Pas de lipsync à générer</h3>
+        <p className="text-sm text-pf-dim max-w-md mx-auto">
+          Aucun brief n&apos;a d&apos;avatar IA dans ce batch.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      <Intro
+        title="Génère tous les lipsyncs"
+        body="On envoie à Kling chaque (image + voix off) prêt(e). Les vidéos s'attribuent automatiquement au bon brief. Compte ~1 min par lipsync, jusqu'à 3 en parallèle."
+      />
+
+      <div className="bg-pf-elev border border-pf-border rounded-2xl px-5 py-4 flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2 flex-1 flex-wrap">
+          <Pill label={`${totals.done} / ${totals.total} done`} tone={totals.done === totals.total ? "ok" : "neutral"} />
+          {totals.running > 0 && <Pill label={`${totals.running} en cours`} tone="run" />}
+          {totals.error > 0 && <Pill label={`${totals.error} erreurs`} tone="err" />}
+          {totals.notReady > 0 && <Pill label={`${totals.notReady} pas prêt(s)`} tone="muted" />}
+        </div>
+        {anyRunning ? (
+          <button
+            type="button"
+            onClick={onCancel}
+            className="bg-pf-soft border border-pf-border hover:border-pf-danger text-pf-text hover:text-pf-danger rounded-lg px-4 py-2.5 text-sm font-semibold inline-flex items-center gap-2 transition-colors"
+          >
+            <Pause size={14} />
+            Stop file
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onRunAll}
+            disabled={pendingCount === 0}
+            className="bg-pf-accent text-pf-accent-fg font-bold rounded-lg px-5 py-2.5 text-sm inline-flex items-center gap-2 disabled:opacity-40 hover:bg-pf-accent/90 transition-colors"
+          >
+            <Sparkles size={14} />
+            {pendingCount === 0
+              ? totals.notReady > 0
+                ? "Avatars incomplets — assigne images + voix"
+                : "Tout est généré ✓"
+              : `Générer les ${pendingCount} lipsyncs`}
+          </button>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {withAvatars.map((b) => {
+          const slots: { hookId: string; av: AvatarSlot; hookLabel: string }[] = [];
+          for (const h of b.hooks) {
+            const hookLabel = h.index === 1 ? "V1" : `H${h.index}`;
+            for (const av of h.avatars) {
+              slots.push({ hookId: h.id, av, hookLabel });
+            }
+          }
+          const briefDone = slots.every(
+            (s) => s.av.lipsyncStatus === "done" && s.av.lipsyncVideoUrl,
+          );
+          return (
+            <div
+              key={b.id}
+              className={`bg-pf-elev border rounded-2xl overflow-hidden ${
+                briefDone ? "border-pf-ok/40" : "border-pf-border"
+              }`}
+            >
+              <div className="flex items-center justify-between px-5 py-3.5 border-b border-pf-border bg-pf-soft/40">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-9 h-9 rounded-lg bg-pf-accent/15 border border-pf-accent/30 text-pf-accent flex items-center justify-center shrink-0">
+                    <Video size={16} />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-base font-bold truncate">{b.adsetName}</div>
+                    <div className="text-sm text-pf-muted font-mono">
+                      {slots.filter((s) => s.av.lipsyncStatus === "done").length} / {slots.length}{" "}
+                      lipsyncs
+                    </div>
+                  </div>
+                </div>
+                {briefDone ? (
+                  <BadgeOK label="OK" />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => onOpenBrief(b.id)}
+                    className="text-sm text-pf-accent hover:underline inline-flex items-center gap-1"
+                  >
+                    Détails
+                    <ArrowRight size={12} />
+                  </button>
+                )}
+              </div>
+
+              <div className="divide-y divide-pf-border">
+                {slots.map(({ hookId, av, hookLabel }) => {
+                  const key = `${b.id}:${hookId}:${av.id}`;
+                  const s = lipsyncState.get(key);
+                  const url = av.lipsyncVideoUrl || s?.url;
+                  const status: LsCellStatus =
+                    av.lipsyncStatus === "done"
+                      ? "done"
+                      : (s?.status ?? (av.imageUrl && av.voClipUrl ? "idle" : "idle"));
+                  const ready = av.imageUrl && av.voClipUrl;
+                  return (
+                    <div key={key} className="px-5 py-3 flex items-center gap-3">
+                      <span className="text-sm font-bold font-mono text-pf-text bg-pf-soft border border-pf-border rounded-md px-2 py-0.5 shrink-0">
+                        {hookLabel}
+                      </span>
+                      <span className="text-sm truncate flex-1">{av.label}</span>
+                      {!ready ? (
+                        <Pill label="Image/VO manquant" tone="muted" />
+                      ) : status === "done" ? (
+                        <span className="inline-flex items-center gap-1.5 text-pf-ok text-sm">
+                          <Check size={14} className="pf-success-pop" />
+                          Done
+                        </span>
+                      ) : status === "running" ? (
+                        <span className="inline-flex items-center gap-2 text-pf-warn text-sm">
+                          <span className="w-2 h-2 rounded-full bg-pf-warn pf-pulse-dot" />
+                          En cours
+                        </span>
+                      ) : status === "error" ? (
+                        <span className="text-pf-danger text-sm" title={s?.error}>
+                          Erreur
+                        </span>
+                      ) : (
+                        <span className="text-pf-muted text-sm">Idle</span>
+                      )}
+                      {url && (
+                        <a
+                          href={url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-pf-accent text-sm hover:underline inline-flex items-center gap-1"
+                        >
+                          Voir
+                          <ExternalLink size={11} />
+                        </a>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ===========================================================================
+// Step 6 — Sync (was 5)
+// ===========================================================================
+
+function Step6Sync({
   briefs,
   syncState,
   onSyncAll,
   onSyncOne,
+  voState,
+  lipsyncState,
 }: {
   briefs: Brief[];
-  syncState: Map<
-    string,
-    { status: "idle" | "running" | "done" | "error"; error?: string; url?: string }
-  >;
+  syncState: Map<string, SyncCellState>;
   onSyncAll: () => void;
   onSyncOne: (b: Brief) => void;
+  voState: Map<string, VoCellState>;
+  lipsyncState: Map<string, LsCellState>;
 }) {
   const totals = useMemo(() => {
     let done = 0,
@@ -1134,103 +1791,116 @@ function Step5Sync({
   }, [briefs, syncState]);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <Intro
         title="Pousse tout vers Notion + Drive"
-        body="Chaque brief crée 3 pages Notion (une par hook). Les voix off et avatars sont uploadés vers Drive selon ton arborescence. Lien Notion visible dès qu'un brief est sync."
+        body="Chaque brief crée 3 pages Notion (1 par hook). Les voix off et avatars sont uploadés vers Drive selon l'arborescence. Le lien Notion s'affiche dès qu'un brief est sync."
       />
 
-      <div className="bg-pf-elev border border-pf-border rounded-xl px-4 py-3 flex flex-wrap items-center gap-3">
-        <div className="flex items-center gap-1.5 text-xs flex-1">
-          <Pill label={`${totals.done} / ${totals.total} sync`} tone={totals.done === totals.total ? "ok" : "neutral"} />
+      <div className="bg-pf-elev border border-pf-border rounded-2xl px-5 py-4 flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2 flex-1 flex-wrap">
+          <Pill
+            label={`${totals.done} / ${totals.total} sync`}
+            tone={totals.done === totals.total ? "ok" : "neutral"}
+          />
           {totals.running > 0 && <Pill label={`${totals.running} en cours`} tone="run" />}
-          {totals.error > 0 && <Pill label={`${totals.error} erreur${totals.error > 1 ? "s" : ""}`} tone="err" />}
+          {totals.error > 0 && (
+            <Pill label={`${totals.error} erreur${totals.error > 1 ? "s" : ""}`} tone="err" />
+          )}
         </div>
         <button
           type="button"
           onClick={onSyncAll}
           disabled={totals.running > 0}
-          className="bg-pf-accent text-pf-accent-fg font-semibold rounded-md px-4 py-1.5 text-xs inline-flex items-center gap-1.5 disabled:opacity-40 hover:bg-pf-accent/90 transition-colors"
+          className="bg-pf-accent text-pf-accent-fg font-bold rounded-lg px-5 py-2.5 text-sm inline-flex items-center gap-2 disabled:opacity-40 hover:bg-pf-accent/90 transition-colors"
         >
-          <Sparkles size={12} />
+          <Sparkles size={14} />
           Push tout vers Notion
         </button>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {briefs.map((b) => {
           const s = syncState.get(b.id);
           const status = s?.status ?? "idle";
           const filledHooks = b.hooks.filter((h) => h.hookScript.trim()).length;
-          const filledVo = b.hooks.filter((h) => h.cutVoUrl).length;
+          const filledVo = b.hooks.filter(
+            (h) =>
+              h.cutVoUrl || voState.get(`${b.id}:${h.id}`)?.status === "done",
+          ).length;
+          const totalLs = b.avatarCount * 3;
+          const doneLs = b.hooks.reduce(
+            (acc, h) =>
+              acc +
+              h.avatars.filter(
+                (a) =>
+                  (a.lipsyncStatus === "done" && a.lipsyncVideoUrl) ||
+                  lipsyncState.get(`${b.id}:${h.id}:${a.id}`)?.status === "done",
+              ).length,
+            0,
+          );
+          const borderClass =
+            status === "done"
+              ? "border-pf-ok/50"
+              : status === "error"
+                ? "border-pf-danger/50"
+                : "border-pf-border";
           return (
-            <div
-              key={b.id}
-              className={`bg-pf-elev border rounded-xl p-4 ${
-                status === "done"
-                  ? "border-pf-ok/50"
-                  : status === "error"
-                    ? "border-pf-danger/50"
-                    : "border-pf-border"
-              }`}
-            >
-              <div className="flex items-start justify-between mb-3">
-                <div className="text-sm font-semibold truncate flex-1 min-w-0">
-                  {b.adsetName}
+            <div key={b.id} className={`bg-pf-elev border rounded-2xl p-5 ${borderClass}`}>
+              <div className="flex items-start justify-between mb-3 gap-3">
+                <div className="min-w-0">
+                  <div className="text-base font-bold truncate">{b.adsetName}</div>
+                  <div className="text-sm text-pf-muted font-mono mt-0.5">
+                    3 hooks
+                    {b.avatarCount > 0 ? ` × ${b.avatarCount} avatar(s)` : ""}
+                  </div>
                 </div>
-                <StatusCell status={status === "idle" ? "idle" : status === "done" ? "done" : status === "running" ? "running" : "error"} error={s?.error} />
+                <div className="shrink-0">
+                  <SyncStatusBadge status={status} error={s?.error} />
+                </div>
               </div>
-              <div className="space-y-1.5 mb-3">
-                <Row label="Scripts" value={`${filledHooks} / 3`} done={filledHooks === 3} />
-                <Row label="Voix off" value={`${filledVo} / 3`} done={filledVo === 3} />
+
+              <div className="space-y-2 my-4">
+                <ChecklineRow label="Scripts" done={filledHooks} total={3} />
+                <ChecklineRow label="Voix off" done={filledVo} total={3} />
                 {b.avatarCount > 0 && (
-                  <Row
-                    label="Avatars"
-                    value={`${b.hooks.reduce(
-                      (a, h) =>
-                        a + h.avatars.filter((x) => x.lipsyncStatus === "done").length,
-                      0,
-                    )} / ${b.avatarCount * 3}`}
-                    done={b.hooks.every((h) =>
-                      h.avatars.every((a) => a.lipsyncStatus === "done"),
-                    )}
-                  />
+                  <ChecklineRow label="Lipsyncs" done={doneLs} total={totalLs} />
                 )}
               </div>
 
-              {s?.url ? (
+              {s?.url && (
                 <Link
                   href={s.url}
                   target="_blank"
-                  className="inline-flex items-center gap-1 text-xs text-pf-accent hover:underline mb-2"
+                  className="inline-flex items-center gap-1.5 text-sm text-pf-accent hover:underline mb-3"
                 >
-                  Voir la page Notion <ExternalLink size={11} />
+                  Voir la page Notion <ExternalLink size={12} />
                 </Link>
-              ) : null}
+              )}
 
-              {s?.error ? (
-                <div className="text-[11px] text-pf-danger bg-pf-danger/10 border border-pf-danger/30 rounded-md px-2 py-1.5 mb-2">
+              {s?.error && (
+                <div className="text-sm text-pf-danger bg-pf-danger/10 border border-pf-danger/30 rounded-lg px-3 py-2 mb-3 leading-relaxed">
                   {s.error}
                 </div>
-              ) : null}
+              )}
 
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => onSyncOne(b)}
                   disabled={status === "running"}
-                  className="flex-1 text-xs bg-pf-soft border border-pf-border hover:border-pf-accent rounded-md py-1.5 disabled:opacity-40 transition-colors inline-flex items-center justify-center gap-1.5"
+                  className="flex-1 text-sm bg-pf-soft border border-pf-border hover:border-pf-accent rounded-lg py-2 disabled:opacity-40 transition-colors inline-flex items-center justify-center gap-2 font-semibold"
                 >
                   {status === "running" ? (
-                    <Loader2 size={11} className="animate-spin" />
+                    <Loader2 size={13} className="animate-spin" />
                   ) : (
-                    <RefreshCw size={11} />
+                    <RefreshCw size={13} />
                   )}
                   {status === "done" ? "Re-sync" : "Sync"}
                 </button>
                 <Link
                   href={`/briefs/${b.id}`}
-                  className="text-xs text-pf-dim hover:text-pf-text border border-pf-border hover:border-pf-accent rounded-md px-2.5 py-1.5 transition-colors"
+                  className="text-sm text-pf-dim hover:text-pf-text border border-pf-border hover:border-pf-accent rounded-lg px-3 py-2 transition-colors font-medium"
                   title="Ouvrir le wizard détaillé"
                 >
                   Edit
@@ -1244,24 +1914,15 @@ function Step5Sync({
   );
 }
 
-function Row({ label, value, done }: { label: string; value: string; done: boolean }) {
-  return (
-    <div className="flex items-center justify-between text-[11px]">
-      <span className="text-pf-muted">{label}</span>
-      <span className={`font-mono ${done ? "text-pf-ok" : "text-pf-dim"}`}>{value}</span>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Shared bits
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 function Intro({ title, body }: { title: string; body: string }) {
   return (
-    <div className="bg-pf-soft/40 border border-pf-border rounded-xl px-4 py-3">
-      <div className="text-sm font-semibold mb-0.5">{title}</div>
-      <p className="text-xs text-pf-dim leading-relaxed">{body}</p>
+    <div className="bg-pf-soft/40 border border-pf-border rounded-2xl px-5 py-4">
+      <div className="text-lg font-bold mb-1">{title}</div>
+      <p className="text-sm text-pf-dim leading-relaxed">{body}</p>
     </div>
   );
 }
@@ -1271,7 +1932,7 @@ function Pill({
   tone,
 }: {
   label: string;
-  tone: "ok" | "run" | "err" | "neutral";
+  tone: "ok" | "run" | "err" | "neutral" | "muted";
 }) {
   const c =
     tone === "ok"
@@ -1280,17 +1941,90 @@ function Pill({
         ? "bg-pf-warn/15 text-pf-warn border-pf-warn/40"
         : tone === "err"
           ? "bg-pf-danger/15 text-pf-danger border-pf-danger/40"
-          : "bg-pf-soft text-pf-dim border-pf-border";
+          : tone === "muted"
+            ? "bg-pf-soft text-pf-muted border-pf-border"
+            : "bg-pf-soft text-pf-dim border-pf-border";
   return (
-    <span className={`inline-flex items-center text-[11px] font-mono rounded-md px-2 py-0.5 border ${c}`}>
+    <span
+      className={`inline-flex items-center text-sm font-mono rounded-lg px-2.5 py-1 border ${c}`}
+    >
       {label}
     </span>
   );
 }
 
-// ---------------------------------------------------------------------------
+function BadgeOK({ label }: { label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-sm font-bold uppercase tracking-wider bg-pf-ok/15 text-pf-ok border border-pf-ok/40 rounded-lg px-2.5 py-1 shrink-0">
+      <Check size={14} />
+      {label}
+    </span>
+  );
+}
+
+function StatusBadge({ status, error }: { status: VoCellStatus; error?: string }) {
+  if (status === "done") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-pf-ok">
+        <Check size={15} className="pf-success-pop" />
+        Voix off prête
+      </span>
+    );
+  }
+  if (status === "running") {
+    return (
+      <span className="inline-flex items-center gap-2 text-sm font-semibold text-pf-warn">
+        <span className="w-2 h-2 rounded-full bg-pf-warn pf-pulse-dot inline-block" />
+        En génération…
+      </span>
+    );
+  }
+  if (status === "error") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-pf-danger" title={error}>
+        <X size={14} />
+        Erreur
+      </span>
+    );
+  }
+  return <span className="text-sm text-pf-muted">En attente</span>;
+}
+
+function SyncStatusBadge({ status, error }: { status: SyncCellState["status"]; error?: string }) {
+  if (status === "done") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-sm font-bold uppercase tracking-wider bg-pf-ok/15 text-pf-ok border border-pf-ok/40 rounded-lg px-2.5 py-1">
+        <Check size={14} className="pf-success-pop" />
+        Sync
+      </span>
+    );
+  }
+  if (status === "running") {
+    return (
+      <span className="inline-flex items-center gap-2 text-sm font-semibold text-pf-warn bg-pf-warn/15 border border-pf-warn/40 rounded-lg px-2.5 py-1">
+        <Loader2 size={13} className="animate-spin" />
+        Sync…
+      </span>
+    );
+  }
+  if (status === "error") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-pf-danger bg-pf-danger/15 border border-pf-danger/40 rounded-lg px-2.5 py-1" title={error}>
+        <X size={13} />
+        Erreur
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center text-sm text-pf-muted bg-pf-soft border border-pf-border rounded-lg px-2.5 py-1">
+      Idle
+    </span>
+  );
+}
+
+// ===========================================================================
 // Utilities
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 function makeRow(): DraftRow {
   return {
@@ -1307,14 +2041,3 @@ function composeAdsetName(briefName: string, creativeName: string): string {
   if (a && b) return `${a} — ${b}`;
   return a || b || "Brief sans titre";
 }
-
-// Hydrate briefs that already exist in localStorage. The wizard is
-// instantiated fresh on every page mount; loadBriefs() makes the picker
-// re-pick up a session that was interrupted (refresh / nav away).
-//
-// NOTE: this is currently unused — we always start with empty rows. Kept
-// as a hook for future "resume in-flight batch" flows.
-export function _unusedLoadAllBriefsForBatch(): Brief[] {
-  return loadBriefs();
-}
-

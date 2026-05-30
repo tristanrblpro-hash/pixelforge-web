@@ -453,7 +453,20 @@ export function CutSilenceStudio() {
         });
         if (!updated) throw new Error("Brief cible introuvable.");
         if (attachTarget) clearAttachTarget();
-        router.push(`/briefs/${target.briefId}`);
+        // The batch wizard hands off here with a return-to flag in
+        // sessionStorage so the user lands back on /briefs/batch instead
+        // of the single-brief wizard. Falls back to the per-brief
+        // wizard for the legacy single-brief flow.
+        const returnTo =
+          typeof window !== "undefined"
+            ? window.sessionStorage.getItem("pf:cutSilenceReturnTo")
+            : null;
+        if (returnTo) {
+          window.sessionStorage.removeItem("pf:cutSilenceReturnTo");
+          router.push(returnTo);
+        } else {
+          router.push(`/briefs/${target.briefId}`);
+        }
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {

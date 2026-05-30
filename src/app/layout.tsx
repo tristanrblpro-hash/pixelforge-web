@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { BatchResumeBanner } from "@/components/BatchResumeBanner";
 import { TopNav } from "@/components/TopNav";
 
 const geistSans = Geist({
@@ -27,6 +28,7 @@ export default function RootLayout({
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
       <body className="bg-pf-bg text-pf-text min-h-screen flex flex-col">
         <TopNav />
+        <BatchResumeBanner />
         <main className="flex-1 px-8 py-7 pb-48 max-w-[1600px] w-full mx-auto">
           {children}
         </main>

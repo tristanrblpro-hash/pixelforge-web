@@ -93,15 +93,17 @@ export function GdocImportModal({ defaultAvatarCount, onClose, onImported }: Pro
           }
         }
 
-        // Scene setups (UPPERCASE lines like "HOMME DERMATO LUNETTE #1")
-        // are stripped from the script by the parser. We surface them as
-        // per-hook filming notes so the monteur sees them in Notion
-        // without the TTS reading them aloud.
-        if (ad.scenes.length > 0) {
-          const notesText = formatScenesAsNotes(ad.scenes);
-          for (const h of b.hooks) {
-            h.notes = notesText;
-          }
+        // Compose each hook's filming notes from the parsed content:
+        //   - Scene setups (UPPERCASE markers from V1 body) — shared
+        //     across the 3 hooks since the video structure is the same.
+        //   - Per-hook monteur notes (lines starting with `>`).
+        // Both feed into Notion's "Filming notes" block via hook.notes.
+        for (let i = 0; i < 3; i++) {
+          const hook = b.hooks[i];
+          if (!hook) continue;
+          const personalNotes = ad.hookNotes[i] ?? [];
+          const composed = composeFilmingNotes(ad.scenes, personalNotes);
+          if (composed) hook.notes = composed;
         }
         const saved = upsertBrief(b);
         created.push(saved);
@@ -198,9 +200,10 @@ export function GdocImportModal({ defaultAvatarCount, onClose, onImported }: Pro
                 <code>Ad #N - Créa - Hook N</code>.
               </div>
               <div>
-                Astuce notes perso : préfixe une ligne par{" "}
-                <code className="text-pf-accent">*</code> pour qu&apos;elle soit
-                totalement ignorée (ni en VO, ni dans Notion).
+                <code className="text-pf-accent">*</code> ma note perso →
+                totalement ignorée. <code className="text-pf-accent">&gt;</code> ma
+                note monteur → atterrit dans Filming notes sur Notion (par
+                hook si écrite sous le hook, sinon V1).
               </div>
             </div>
           </div>
@@ -377,15 +380,48 @@ function AdPreview({ ad }: { ad: ParsedAd }) {
           </div>
         </div>
       )}
+
+      {ad.hookNotes.some((n) => n.length > 0) && (
+        <div className="mt-2 pt-2 border-t border-pf-border/60">
+          <div className="text-[10px] uppercase tracking-wider text-pf-muted font-bold mb-1">
+            Notes monteur ({ad.hookNotes.reduce((acc, n) => acc + n.length, 0)})
+          </div>
+          <div className="space-y-0.5 text-[10px] text-pf-dim">
+            {ad.hookNotes.map(
+              (notes, idx) =>
+                notes.length > 0 && (
+                  <div key={idx} className="flex gap-1.5">
+                    <span className="font-mono font-bold text-pf-accent shrink-0">
+                      {idx === 0 ? "V1" : `H${idx + 1}`}
+                    </span>
+                    <span className="line-clamp-2 leading-snug">
+                      {notes.join(" · ")}
+                    </span>
+                  </div>
+                ),
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-// Format the extracted scene markers as a readable note for the monteur.
-// Surfaces as "Filming notes" block in Notion via brief.hook.notes.
-function formatScenesAsNotes(scenes: string[]): string {
-  const lines = scenes.map((s, i) => `${i + 1}. ${s}`);
-  return `Setups vidéo (dans l'ordre du script) :\n${lines.join("\n")}`;
+// Compose the two sources of per-hook filming-notes into one readable
+// block: scene setups (numbered list, from UPPERCASE markers in the V1
+// body) + monteur notes (bulleted list, from `>` lines). Returns "" if
+// both are empty so the caller can skip setting hook.notes entirely.
+function composeFilmingNotes(scenes: string[], notes: string[]): string {
+  const sections: string[] = [];
+  if (scenes.length > 0) {
+    const list = scenes.map((s, i) => `${i + 1}. ${s}`).join("\n");
+    sections.push(`Setups vidéo (dans l'ordre du script) :\n${list}`);
+  }
+  if (notes.length > 0) {
+    const list = notes.map((n) => `- ${n}`).join("\n");
+    sections.push(`Notes monteur :\n${list}`);
+  }
+  return sections.join("\n\n");
 }
 
 // Small chip used in the preview to show per-hook avatar counts.

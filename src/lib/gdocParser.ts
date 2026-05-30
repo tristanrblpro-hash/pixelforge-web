@@ -57,6 +57,11 @@ export type ParsedAd = {
    *  absent, undefined → the import flow falls back to its default
    *  slider value for the whole brief. */
   avatarsPerHook?: [number, number, number];
+  /** Monteur instructions per hook, in order [V1, H2, H3]. Lines that
+   *  start with `>` inside the body (→ V1) or inside a hook section
+   *  (→ that hook) are collected here. The import flow merges them
+   *  with the scene setups into hook.notes (Notion "Filming notes"). */
+  hookNotes: [string[], string[], string[]];
 };
 
 export type ParseResult = {
@@ -72,15 +77,33 @@ export type ParseResult = {
 
 const AD_HEADER_REGEX = /^[ \t]*Ad\s+Test\s*#\s*(\d+)\s*[-–—:]\s*(.+?)[ \t]*$/im;
 const AD_HEADER_REGEX_G = /^[ \t]*Ad\s+Test\s*#\s*(\d+)\s*[-–—:]\s*(.+?)[ \t]*$/gim;
-const REF_REGEX = /^[ \t]*R[ée]f[eé]rence\s*[:=]\s*(\S.*?)[ \t]*$/im;
-const AVATARS_REGEX = /^[ \t]*Avatars?\s*[:=]\s*(.+?)[ \t]*$/im;
+// Reference URL — tolerates the URL being on the SAME line ("Référence: <url>")
+// OR on the next non-empty line ("Référence :\n<url>"), matching the user's
+// template-style layout where each field has its label as a header.
+const REF_REGEX =
+  /^[ \t]*R[ée]f[eé]rence\s*[:=][ \t]*(?:\r?\n[ \t]*)?(\S[^\n]*?)[ \t]*$/im;
+
+// Avatars line — same multi-line tolerance.
+const AVATARS_REGEX =
+  /^[ \t]*Avatars?\s*[:=][ \t]*(?:\r?\n[ \t]*)?(\S[^\n]*?)[ \t]*$/im;
+
+// Section labels we want to drop entirely from the body so they don't leak
+// into the VO. The user sometimes writes "Script Original :" as a header
+// to indicate where the V1 body starts.
+const LABEL_LINE_REGEX_G =
+  /^[ \t]*(?:Script(?:\s+(?:Original|V1))?|Body|Corps|Texte\s+parl[ée])[ \t]*[:.]?[ \t]*$/gim;
 
 // Captures one of the three trailing hook headers. Tolerant of:
-//   - "Ad #1 - X - Hook 1 (Original)" / "Ad#1 — X — Hook 1"
-//   - the index number after "Hook"
-//   - optional parenthesized note like "(Original)"
+//   - "Ad #1 - X - Hook 1 (Original)"     ← classic
+//   - "Ad #2 - X - Hook 2"                ← without parens
+//   - "Ad#1 — X — Hook 1"                 ← em/en dash and no space
+//   - "Ad #1 - X (Original)"              ← template form, no "Hook 1" word
+// Group 1 = "Ad #N" digit (always captured).
+// Group 2 = explicit "Hook N" digit (undefined when the header used the
+//           "(Original)" form). The matching code falls back to group 1
+//           when group 2 is undefined.
 const HOOK_HEADER_REGEX_G =
-  /^[ \t]*Ad\s*#?\s*(\d+)\s*[-–—]\s*.+?[-–—]\s*Hook\s*(\d+)\s*(?:\([^)]*\))?\s*[ \t]*$/gim;
+  /^[ \t]*Ad\s*#?\s*(\d+)\s*[-–—]\s*[^\n]+?(?:[-–—]\s*Hook\s*(\d+)\s*(?:\([^)]*\))?|\s*\(Original\))[ \t]*$/gim;
 
 export function parseGoogleDoc(text: string): ParseResult {
   const warnings: string[] = [];
@@ -165,9 +188,11 @@ function parseAdBlock(
   }
 
   // 3. Body = everything between "Référence:" line and the first hook
-  //    header. We strip the Référence + Avatars metadata lines, then
-  //    peel out any UPPERCASE scene-marker lines so they don't leak
-  //    into the VO.
+  //    header. We strip the Référence + Avatars metadata lines, peel
+  //    out UPPERCASE scene-marker lines, then collect monteur-note
+  //    lines (those starting with `>`) into the V1 hook's notes
+  //    bucket. All of that runs in sequence so the final body is
+  //    pure spoken script.
   let body = block.slice(0, bodyEnd).trim();
   if (refMatch) {
     body = body.replace(refMatch[0], "").trim();
@@ -175,30 +200,59 @@ function parseAdBlock(
   if (avMatch) {
     body = body.replace(avMatch[0], "").trim();
   }
-  const { spoken, scenes } = stripSceneHeaders(body);
-  body = spoken;
+  // Strip "Script Original :" / "Script :" / "Body :" section labels that
+  // the user uses as headers above the V1 body. They are not spoken text.
+  body = body.replace(LABEL_LINE_REGEX_G, "").trim();
+  const { spoken: bodyAfterScenes, scenes } = stripSceneHeaders(body);
+  const { spoken: bodyAfterNotes, notes: v1Notes } = extractMonteurNotes(bodyAfterScenes);
+  body = bodyAfterNotes;
 
   if (!body) {
     warnings.push(`${briefName} : corps de script vide.`);
   }
 
-  // 4. Parse each hook line. The header is matched; the next non-empty
-  //    line(s) after it form the quoted line.
+  // 4. Parse each hook line + any monteur notes inside the hook section.
+  //    The header is matched; the first non-empty non-note line after it
+  //    is the quoted opening. Lines that start with `>` anywhere in
+  //    that hook's segment are collected as monteur notes for that hook.
   const hookLines: Record<number, string | undefined> = { 1: undefined, 2: undefined, 3: undefined };
+  const hookNotesByIdx: Record<1 | 2 | 3, string[]> = { 1: [], 2: [], 3: [] };
   for (let i = 0; i < hookMatches.length; i++) {
     const hm = hookMatches[i];
-    const hookIdx = Number(hm[2]); // captures group #2 = the "Hook N" digit
+    // Group 2 = explicit "Hook N" digit. When absent (the "(Original)"
+    // form), fall back to group 1 = the "Ad #N" digit, since by
+    // convention Ad #1 = V1, Ad #2 = H2, Ad #3 = H3.
+    const explicitHook = hm[2] ? Number(hm[2]) : NaN;
+    const adNumber = Number(hm[1]);
+    const hookIdx = Number.isFinite(explicitHook) ? explicitHook : adNumber;
     if (hookIdx !== 1 && hookIdx !== 2 && hookIdx !== 3) continue;
     const start = (hm.index ?? 0) + hm[0].length;
     const end =
       i + 1 < hookMatches.length ? hookMatches[i + 1].index ?? block.length : block.length;
     const segment = block.slice(start, end).trim();
-    // Take the first non-empty line. Strip surrounding quotes/whitespace.
-    const firstLine = segment.split(/\n/).map((s) => s.trim()).find(Boolean);
-    if (firstLine) {
-      hookLines[hookIdx] = stripQuotes(firstLine);
+
+    let openingTaken = false;
+    for (const rawLine of segment.split(/\n/)) {
+      const trimmed = rawLine.trim();
+      if (!trimmed) continue;
+      if (trimmed.startsWith(">")) {
+        const clean = trimmed.replace(/^>+\s*/, "").trim();
+        if (clean) hookNotesByIdx[hookIdx as 1 | 2 | 3].push(clean);
+        continue;
+      }
+      // First non-note, non-empty line is the quoted opening.
+      if (!openingTaken) {
+        hookLines[hookIdx] = stripQuotes(trimmed);
+        openingTaken = true;
+      }
     }
   }
+  // V1 notes from the body are merged with notes inside Hook 1's section.
+  const finalHookNotes: [string[], string[], string[]] = [
+    [...v1Notes, ...hookNotesByIdx[1]],
+    hookNotesByIdx[2],
+    hookNotesByIdx[3],
+  ];
 
   if (!hookLines[1]) warnings.push(`${briefName} : Hook 1 (Original) manquant.`);
   if (!hookLines[2]) warnings.push(`${briefName} : Hook 2 manquant.`);
@@ -214,7 +268,28 @@ function parseAdBlock(
     hook2Line: hookLines[2],
     hook3Line: hookLines[3],
     avatarsPerHook,
+    hookNotes: finalHookNotes,
   };
+}
+
+// Extract monteur-note lines (those starting with `>`) from a free-form
+// text blob. Returns the text minus those lines + the collected notes
+// (cleaned of the `>` prefix and surrounding whitespace).
+function extractMonteurNotes(text: string): { spoken: string; notes: string[] } {
+  const lines = text.split(/\n/);
+  const spokenLines: string[] = [];
+  const notes: string[] = [];
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith(">")) {
+      const clean = trimmed.replace(/^>+\s*/, "").trim();
+      if (clean) notes.push(clean);
+      continue;
+    }
+    spokenLines.push(raw);
+  }
+  const spoken = spokenLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return { spoken, notes };
 }
 
 // ---------------------------------------------------------------------------

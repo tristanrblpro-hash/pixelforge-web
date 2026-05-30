@@ -542,6 +542,38 @@ export function BriefBatchWizard() {
     [router],
   );
 
+  // Step 4 quick action: clone hook.cutVoUrl into every avatar's
+  // voClipUrl (when the avatar doesn't already have one). 9 times out
+  // of 10 the user wants the same VO across all avatars of a hook —
+  // this skips the manual per-avatar attach.
+  const useHookVoForAvatars = useCallback(
+    (briefId: string) => {
+      const brief = briefs.get(briefId);
+      if (!brief) return;
+      const next: Brief = {
+        ...brief,
+        hooks: brief.hooks.map((h) => {
+          if (!h.cutVoUrl) return h;
+          return {
+            ...h,
+            avatars: h.avatars.map((a) =>
+              a.voClipUrl
+                ? a
+                : { ...a, voClipUrl: h.cutVoUrl, voClipText: h.hookScript || a.voClipText },
+            ),
+          };
+        }),
+      };
+      const saved = upsertBrief(next);
+      setBriefs((m) => {
+        const nm = new Map(m);
+        nm.set(briefId, saved);
+        return nm;
+      });
+    },
+    [briefs],
+  );
+
   // -----------------------------------------------------------------------
   // Step 5 — Lipsync batch
   // -----------------------------------------------------------------------
@@ -558,7 +590,7 @@ export function BriefBatchWizard() {
     for (const r of rows) {
       if (!r.briefId) continue;
       const brief = briefs.get(r.briefId);
-      if (!brief || brief.avatarCount === 0) continue;
+      if (!brief || !briefHasAvatars(brief)) continue;
       for (const h of brief.hooks) {
         for (const av of h.avatars) {
           if (!av.imageUrl || !av.voClipUrl) continue;
@@ -789,7 +821,7 @@ export function BriefBatchWizard() {
   );
 
   const hasAvatars = useMemo(
-    () => committedBriefs.some((b) => b.avatarCount > 0),
+    () => committedBriefs.some(briefHasAvatars),
     [committedBriefs],
   );
 
@@ -859,7 +891,11 @@ export function BriefBatchWizard() {
           />
         )}
         {step === 4 && (
-          <Step4Images briefs={committedBriefs} onOpenBrief={(id) => router.push(`/briefs/${id}`)} />
+          <Step4Images
+            briefs={committedBriefs}
+            onOpenBrief={(id) => router.push(`/briefs/${id}`)}
+            onUseHookVoForAvatars={useHookVoForAvatars}
+          />
         )}
         {step === 5 && (
           <Step5Lipsync
@@ -1549,11 +1585,19 @@ function Step3Voiceover({
 function Step4Images({
   briefs,
   onOpenBrief,
+  onUseHookVoForAvatars,
 }: {
   briefs: Brief[];
   onOpenBrief: (id: string) => void;
+  onUseHookVoForAvatars: (briefId: string) => void;
 }) {
-  const withAvatars = briefs.filter((b) => b.avatarCount > 0);
+  // A brief is in scope here if ANY of its hooks needs at least one avatar,
+  // not if brief.avatarCount > 0 — those two diverge when per-hook counts
+  // differ (e.g. V1=2, H2=1, H3=0 → brief.avatarCount=2 but the user only
+  // has 3 avatars total, not 6).
+  const withAvatars = briefs.filter((b) =>
+    b.hooks.some((h) => h.avatars.length > 0),
+  );
 
   if (withAvatars.length === 0) {
     return (
@@ -1570,11 +1614,11 @@ function Step4Images({
   return (
     <div className="space-y-5">
       <Intro
-        title="Assigne une image à chaque avatar"
-        body="Génère tes images dans Prompts ou Image, puis utilise « 📎 Rattacher au brief » sur chaque image pour la coller sur le bon avatar. Clique « Ouvrir » pour configurer les avatars d'un brief en détail."
+        title="Assigne une image + une voix off à chaque avatar"
+        body="Pour le lipsync il faut UNE image + UN clip vocal par avatar. Génère tes images dans Prompts et tes voix off dans Voiceover, puis utilise « 📎 Rattacher au brief » sur chaque résultat. Tu peux aussi cloner la voix off du hook sur tous ses avatars en un clic."
       />
 
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-wrap items-center gap-2">
         <Link
           href="/prompts"
           target="_blank"
@@ -1584,14 +1628,21 @@ function Step4Images({
           Générer des images (Prompts)
           <ExternalLink size={12} className="text-pf-muted" />
         </Link>
-        <span className="text-sm text-pf-muted">
-          Astuce : clique « 📎 Rattacher au brief » sur chaque image générée.
-        </span>
+        <Link
+          href="/voiceover"
+          target="_blank"
+          className="inline-flex items-center gap-2 bg-pf-soft border border-pf-border hover:border-pf-accent rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors"
+        >
+          <Mic size={15} />
+          Générer des voix off (Voiceover)
+          <ExternalLink size={12} className="text-pf-muted" />
+        </Link>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {withAvatars.map((b) => {
-          const totalSlots = b.avatarCount * 3;
+          // True totals: sum of hook.avatars.length across the 3 hooks.
+          const totalSlots = b.hooks.reduce((acc, h) => acc + h.avatars.length, 0);
           const imagesAssigned = b.hooks.reduce(
             (acc, h) => acc + h.avatars.filter((a) => a.imageUrl).length,
             0,
@@ -1601,14 +1652,25 @@ function Step4Images({
             0,
           );
           const pct = totalSlots === 0 ? 0 : Math.round((imagesAssigned / totalSlots) * 100);
-          const allReady = imagesAssigned === totalSlots && voAssigned === totalSlots;
+          const allReady =
+            totalSlots > 0 && imagesAssigned === totalSlots && voAssigned === totalSlots;
+          // Per-hook breakdown for the title — only show non-zero hooks.
+          const breakdown = b.hooks
+            .map((h) => `${h.index === 1 ? "V1" : `H${h.index}`}=${h.avatars.length}`)
+            .filter((s) => !s.endsWith("=0"))
+            .join(" · ");
+          // The "Use hook VO for avatars" shortcut is only useful when at
+          // least one hook has its cutVoUrl AND at least one avatar
+          // without a clip yet — otherwise it's a no-op.
+          const canCloneHookVo = b.hooks.some(
+            (h) =>
+              h.cutVoUrl && h.avatars.some((a) => !a.voClipUrl),
+          );
           return (
-            <button
+            <div
               key={b.id}
-              type="button"
-              onClick={() => onOpenBrief(b.id)}
-              className={`text-left bg-pf-elev border rounded-2xl p-5 transition-colors group ${
-                allReady ? "border-pf-ok/40 hover:border-pf-ok" : "border-pf-border hover:border-pf-accent"
+              className={`bg-pf-elev border rounded-2xl p-5 transition-colors ${
+                allReady ? "border-pf-ok/40" : "border-pf-border"
               }`}
             >
               <div className="flex items-start justify-between mb-3">
@@ -1619,19 +1681,37 @@ function Step4Images({
               </div>
               <div className="text-base font-bold truncate">{b.adsetName}</div>
               <div className="text-sm text-pf-muted font-mono mt-1">
-                3 hooks × {b.avatarCount} avatar{b.avatarCount > 1 ? "s" : ""}
+                {totalSlots} avatar{totalSlots > 1 ? "s" : ""}
+                {breakdown && ` · ${breakdown}`}
               </div>
 
               <div className="mt-4 space-y-1.5">
                 <ChecklineRow label="Images" done={imagesAssigned} total={totalSlots} />
-                <ChecklineRow label="Voix off avatar" done={voAssigned} total={totalSlots} />
+                <ChecklineRow label="Clips vocaux avatar" done={voAssigned} total={totalSlots} />
               </div>
 
-              <div className="mt-4 text-sm text-pf-accent font-semibold flex items-center gap-1.5">
-                Ouvrir
-                <ArrowRight size={13} className="group-hover:translate-x-0.5 transition-transform" />
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => onOpenBrief(b.id)}
+                  className="inline-flex items-center gap-1.5 text-sm font-semibold bg-pf-accent text-pf-accent-fg rounded-lg px-3.5 py-2 hover:bg-pf-accent/90 transition-colors"
+                >
+                  Ouvrir
+                  <ArrowRight size={13} />
+                </button>
+                {canCloneHookVo && (
+                  <button
+                    type="button"
+                    onClick={() => onUseHookVoForAvatars(b.id)}
+                    className="inline-flex items-center gap-1.5 text-sm font-medium text-pf-dim hover:text-pf-text border border-pf-border hover:border-pf-accent rounded-lg px-3 py-2 transition-colors"
+                    title="Copie la voix off de chaque hook sur tous ses avatars (sans toucher aux clips déjà rattachés)."
+                  >
+                    <Mic size={13} />
+                    Utiliser la VO du hook
+                  </button>
+                )}
               </div>
-            </button>
+            </div>
           );
         })}
       </div>
@@ -1673,7 +1753,7 @@ function Step5Lipsync({
   anyRunning: boolean;
   onOpenBrief: (id: string) => void;
 }) {
-  const withAvatars = briefs.filter((b) => b.avatarCount > 0);
+  const withAvatars = briefs.filter(briefHasAvatars);
 
   const totals = useMemo(() => {
     let total = 0,
@@ -1928,7 +2008,7 @@ function Step6Sync({
             (h) =>
               h.cutVoUrl || voState.get(`${b.id}:${h.id}`)?.status === "done",
           ).length;
-          const totalLs = b.avatarCount * 3;
+          const totalLs = b.hooks.reduce((acc, h) => acc + h.avatars.length, 0);
           const doneLs = b.hooks.reduce(
             (acc, h) =>
               acc +
@@ -1952,7 +2032,7 @@ function Step6Sync({
                   <div className="text-base font-bold truncate">{b.adsetName}</div>
                   <div className="text-sm text-pf-muted font-mono mt-0.5">
                     3 hooks
-                    {b.avatarCount > 0 ? ` × ${b.avatarCount} avatar(s)` : ""}
+                    {totalLs > 0 ? ` · ${totalLs} avatar${totalLs > 1 ? "s" : ""}` : ""}
                   </div>
                 </div>
                 <div className="shrink-0">
@@ -1963,7 +2043,7 @@ function Step6Sync({
               <div className="space-y-2 my-4">
                 <ChecklineRow label="Scripts" done={filledHooks} total={3} />
                 <ChecklineRow label="Voix off" done={filledVo} total={3} />
-                {b.avatarCount > 0 && (
+                {totalLs > 0 && (
                   <ChecklineRow label="Lipsyncs" done={doneLs} total={totalLs} />
                 )}
               </div>
@@ -2133,6 +2213,14 @@ function makeRow(): DraftRow {
     creativeName: "",
     avatarCount: 0,
   };
+}
+
+// True iff this brief has at least one avatar slot somewhere — used to
+// gate the Images + Lipsync steps. brief.avatarCount alone is unreliable
+// since per-hook counts may differ (e.g. V1=2, H2=1, H3=0 → avatarCount
+// is the max=2 but a brief with all zeroes would also have that as 0).
+function briefHasAvatars(b: Brief): boolean {
+  return b.hooks.some((h) => h.avatars.length > 0);
 }
 
 function composeAdsetName(briefName: string, creativeName: string): string {

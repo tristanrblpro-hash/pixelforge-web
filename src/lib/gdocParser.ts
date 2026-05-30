@@ -52,6 +52,11 @@ export type ParsedAd = {
   hook1Line?: string;
   hook2Line?: string;
   hook3Line?: string;
+  /** Number of AI avatars per hook, in order [V1, H2, H3]. Parsed from an
+   *  "Avatars : V1=2, H2=1, H3=0" line (multiple syntaxes accepted). If
+   *  absent, undefined → the import flow falls back to its default
+   *  slider value for the whole brief. */
+  avatarsPerHook?: [number, number, number];
 };
 
 export type ParseResult = {
@@ -68,6 +73,7 @@ export type ParseResult = {
 const AD_HEADER_REGEX = /^[ \t]*Ad\s+Test\s*#\s*(\d+)\s*[-–—:]\s*(.+?)[ \t]*$/im;
 const AD_HEADER_REGEX_G = /^[ \t]*Ad\s+Test\s*#\s*(\d+)\s*[-–—:]\s*(.+?)[ \t]*$/gim;
 const REF_REGEX = /^[ \t]*R[ée]f[eé]rence\s*[:=]\s*(\S.*?)[ \t]*$/im;
+const AVATARS_REGEX = /^[ \t]*Avatars?\s*[:=]\s*(.+?)[ \t]*$/im;
 
 // Captures one of the three trailing hook headers. Tolerant of:
 //   - "Ad #1 - X - Hook 1 (Original)" / "Ad#1 — X — Hook 1"
@@ -134,6 +140,18 @@ function parseAdBlock(
     creativeRef = creativeRef.replace(/[.,;)]+$/, "");
   }
 
+  // 1b. Per-hook avatar counts (optional).
+  let avatarsPerHook: [number, number, number] | undefined;
+  const avMatch = block.match(AVATARS_REGEX);
+  if (avMatch) {
+    avatarsPerHook = parseAvatarLine(avMatch[1]) ?? undefined;
+    if (!avatarsPerHook) {
+      warnings.push(
+        `${briefName} : ligne "Avatars: ..." illisible (essai: "V1=2, H2=1, H3=0" ou "2 / 1 / 0").`,
+      );
+    }
+  }
+
   // 2. Find where the hooks section starts (the first "Ad #N - ... - Hook N"
   //    header). Everything before it is the body of V1.
   const hookMatches = [...block.matchAll(HOOK_HEADER_REGEX_G)];
@@ -144,11 +162,15 @@ function parseAdBlock(
   }
 
   // 3. Body = everything between "Référence:" line and the first hook
-  //    header. We strip the Référence line itself, then peel out any
-  //    UPPERCASE scene-marker lines so they don't leak into the VO.
+  //    header. We strip the Référence + Avatars metadata lines, then
+  //    peel out any UPPERCASE scene-marker lines so they don't leak
+  //    into the VO.
   let body = block.slice(0, bodyEnd).trim();
   if (refMatch) {
     body = body.replace(refMatch[0], "").trim();
+  }
+  if (avMatch) {
+    body = body.replace(avMatch[0], "").trim();
   }
   const { spoken, scenes } = stripSceneHeaders(body);
   body = spoken;
@@ -188,7 +210,71 @@ function parseAdBlock(
     hook1Line: hookLines[1],
     hook2Line: hookLines[2],
     hook3Line: hookLines[3],
+    avatarsPerHook,
   };
+}
+
+// ---------------------------------------------------------------------------
+// "Avatars : ..." parser
+//
+// Accepted forms (numbers 0..5, clamped):
+//   "V1=2, H2=1, H3=0"                    (labeled — recommended)
+//   "V1: 2, Hook 2: 1, Hook 3: 0"
+//   "Hook 1=2, Hook 2=1, Hook 3=0"
+//   "2 / 1 / 0"                            (slash-separated, V1/H2/H3)
+//   "2, 1, 0"                              (comma-separated)
+//   "2"                                    (uniform: applied to all 3)
+// Returns null if nothing parseable.
+// ---------------------------------------------------------------------------
+
+function parseAvatarLine(raw: string): [number, number, number] | null {
+  const s = raw.trim();
+  if (!s) return null;
+
+  // 1. Labeled form (V1=2, H2=1, ...)
+  const labeled: Record<1 | 2 | 3, number | undefined> = { 1: undefined, 2: undefined, 3: undefined };
+  const labelRegex = /(V\s*1|Hook\s*1|H1|V\s*2|Hook\s*2|H2|V\s*3|Hook\s*3|H3)\s*[:=]\s*(\d+)/gi;
+  let any = false;
+  for (const m of s.matchAll(labelRegex)) {
+    const tag = m[1].toUpperCase().replace(/\s+/g, "");
+    const n = clampAvatar(parseInt(m[2], 10));
+    if (n === null) continue;
+    if (tag === "V1" || tag === "HOOK1" || tag === "H1") {
+      labeled[1] = n;
+      any = true;
+    } else if (tag === "V2" || tag === "HOOK2" || tag === "H2") {
+      labeled[2] = n;
+      any = true;
+    } else if (tag === "V3" || tag === "HOOK3" || tag === "H3") {
+      labeled[3] = n;
+      any = true;
+    }
+  }
+  if (any) {
+    return [labeled[1] ?? 0, labeled[2] ?? 0, labeled[3] ?? 0];
+  }
+
+  // 2. Slash or comma-separated triplet.
+  const parts = s.split(/[\/,]/).map((p) => p.trim()).filter(Boolean);
+  if (parts.length === 3 && parts.every((p) => /^\d+$/.test(p))) {
+    const nums = parts.map((p) => clampAvatar(parseInt(p, 10)));
+    if (nums.every((n): n is number => n !== null)) {
+      return nums as [number, number, number];
+    }
+  }
+
+  // 3. Single number → uniform.
+  if (/^\d+$/.test(s)) {
+    const n = clampAvatar(parseInt(s, 10));
+    if (n !== null) return [n, n, n];
+  }
+
+  return null;
+}
+
+function clampAvatar(n: number): number | null {
+  if (Number.isNaN(n) || n < 0) return null;
+  return Math.min(5, n);
 }
 
 // ---------------------------------------------------------------------------

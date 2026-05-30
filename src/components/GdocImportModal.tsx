@@ -16,7 +16,7 @@ import {
   X,
 } from "lucide-react";
 
-import { type Brief, newBrief, upsertBrief } from "@/lib/briefs";
+import { type Brief, newAvatar, newBrief, upsertBrief } from "@/lib/briefs";
 import {
   buildHookScripts,
   parseGoogleDoc,
@@ -61,13 +61,38 @@ export function GdocImportModal({ defaultAvatarCount, onClose, onImported }: Pro
       const created: Brief[] = [];
       for (const ad of parsed.ads) {
         const adsetName = `${ad.briefName} - ${ad.creativeName}`.trim();
-        const b = newBrief({ avatarCount, adsetName });
+        // If the doc specifies per-hook avatar counts, use them as the
+        // authoritative shape; otherwise fall back to the modal's
+        // default slider applied uniformly. brief.avatarCount holds the
+        // max so legacy uniform-resize calls don't crop the largest hook.
+        const perHook = ad.avatarsPerHook;
+        const briefAvatarMax = perHook ? Math.max(...perHook) : avatarCount;
+        const b = newBrief({ avatarCount: briefAvatarMax, adsetName });
         b.creativeRef = ad.creativeRef;
         const { v1, h2, h3 } = buildHookScripts(ad);
         if (b.hooks[0]) b.hooks[0].hookScript = v1;
         if (b.hooks[1]) b.hooks[1].hookScript = h2;
         if (b.hooks[2]) b.hooks[2].hookScript = h3;
         b.baseScript = v1; // store for reference
+
+        // Resize each hook's avatar slots independently when the doc
+        // specifies per-hook counts. newBrief sized everything uniformly
+        // to briefAvatarMax above; we re-trim/grow per hook here.
+        if (perHook) {
+          for (let i = 0; i < 3; i++) {
+            const target = perHook[i];
+            const hook = b.hooks[i];
+            if (!hook) continue;
+            if (target <= 0) {
+              hook.avatars = [];
+            } else {
+              hook.avatars = Array.from({ length: target }, (_, j) =>
+                newAvatar(`Avatar IA ${j + 1}`),
+              );
+            }
+          }
+        }
+
         // Scene setups (UPPERCASE lines like "HOMME DERMATO LUNETTE #1")
         // are stripped from the script by the parser. We surface them as
         // per-hook filming notes so the monteur sees them in Notion
@@ -134,7 +159,9 @@ export function GdocImportModal({ defaultAvatarCount, onClose, onImported }: Pro
                 Colle le doc ici
               </label>
               <div className="flex items-center gap-2">
-                <span className="text-xs text-pf-muted">Avatars/brief :</span>
+                <span className="text-xs text-pf-muted" title="Utilisé seulement quand le doc ne contient pas de ligne 'Avatars : V1=…, H2=…, H3=…'">
+                  Avatars/brief par défaut :
+                </span>
                 <div className="flex items-center gap-1 bg-pf-bg border border-pf-border rounded-md p-0.5">
                   <button
                     type="button"
@@ -308,6 +335,15 @@ function AdPreview({ ad }: { ad: ParsedAd }) {
         <HookLine n={3} label="Hook 3" line={ad.hook3Line} />
       </div>
 
+      {ad.avatarsPerHook && (
+        <div className="mt-1.5 flex items-center gap-1.5 text-[11px]">
+          <span className="text-pf-muted">Avatars :</span>
+          <AvatarChip label="V1" n={ad.avatarsPerHook[0]} />
+          <AvatarChip label="H2" n={ad.avatarsPerHook[1]} />
+          <AvatarChip label="H3" n={ad.avatarsPerHook[2]} />
+        </div>
+      )}
+
       {ad.v1Script && (
         <div className="mt-2 text-[11px] text-pf-muted line-clamp-2 leading-relaxed">
           {ad.v1Script.slice(0, 180)}
@@ -342,6 +378,18 @@ function AdPreview({ ad }: { ad: ParsedAd }) {
 function formatScenesAsNotes(scenes: string[]): string {
   const lines = scenes.map((s, i) => `${i + 1}. ${s}`);
   return `Setups vidéo (dans l'ordre du script) :\n${lines.join("\n")}`;
+}
+
+// Small chip used in the preview to show per-hook avatar counts.
+function AvatarChip({ label, n }: { label: string; n: number }) {
+  const tone = n === 0 ? "text-pf-muted bg-pf-soft" : "text-pf-accent bg-pf-accent/15";
+  return (
+    <span
+      className={`inline-flex items-center gap-0.5 font-mono rounded px-1.5 py-0.5 border border-pf-border text-[10px] ${tone}`}
+    >
+      {label}=<span className="font-bold">{n}</span>
+    </span>
+  );
 }
 
 function HookLine({
@@ -382,6 +430,7 @@ function HookLine({
 const EXAMPLE_PLACEHOLDER = `Ad Test #1 - Anti-Fake Dermato
 
 Référence: https://app.trendtrack.io/share/ads/...
+Avatars : V1=2, H2=1, H3=0
 
 HOMME DERMATO LUNETTE #1 :
 Eye bags can actually get worse if you pick up a fake microneedle patch...

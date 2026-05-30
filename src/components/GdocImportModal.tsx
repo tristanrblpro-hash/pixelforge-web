@@ -190,10 +190,19 @@ export function GdocImportModal({ defaultAvatarCount, onClose, onImported }: Pro
               className="flex-1 bg-pf-bg border border-pf-border rounded-xl px-4 py-3 text-sm font-mono leading-relaxed focus:outline-none focus:border-pf-accent resize-none"
               spellCheck={false}
             />
-            <div className="text-xs text-pf-muted leading-relaxed">
-              Format attendu : <code>Ad Test #N - Créa</code> puis{" "}
-              <code>Référence:</code> (URL), corps du script, et 3 hooks
-              terminaux <code>Ad #N - Créa - Hook N</code>.
+            <div className="text-xs text-pf-muted leading-relaxed space-y-1">
+              <div>
+                Format : <code>Ad Test #N - Créa</code> puis{" "}
+                <code>Référence:</code> (URL), <code>Avatars : V1=2, H2=1, H3=0</code>,
+                corps du script, et 3 hooks terminaux{" "}
+                <code>Ad #N - Créa - Hook N</code>.
+              </div>
+              <div>
+                Astuce notes perso : préfixe une ligne par{" "}
+                <code className="text-pf-accent">*</code> ou{" "}
+                <code className="text-pf-accent">//</code> pour qu&apos;elle soit
+                totalement ignorée (ni en VO, ni dans Notion).
+              </div>
             </div>
           </div>
 
@@ -431,6 +440,9 @@ const EXAMPLE_PLACEHOLDER = `Ad Test #1 - Anti-Fake Dermato
 
 Référence: https://app.trendtrack.io/share/ads/...
 Avatars : V1=2, H2=1, H3=0
+
+* Note perso : à valider avec le client avant de lancer
+// TODO : refaire le hook 3 plus émotionnel
 
 HOMME DERMATO LUNETTE #1 :
 Eye bags can actually get worse if you pick up a fake microneedle patch...

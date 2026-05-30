@@ -87,9 +87,12 @@ export function parseGoogleDoc(text: string): ParseResult {
   const ads: ParsedAd[] = [];
 
   // Normalize newlines (the user pastes from Google Docs which can mix in
-  // U+00A0 NBSPs and \r\n).
+  // U+00A0 NBSPs and \r\n). Then strip personal-note lines (see helper).
   const norm = text
     .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .filter((line) => !isPersonalNoteLine(line))
+    .join("\n")
     .replace(/ /g, " ")
     .trim();
 
@@ -360,4 +363,29 @@ export function buildHookScripts(ad: ParsedAd): HookScripts {
   const h2 = ad.hook2Line ?? "";
   const h3 = ad.hook3Line ?? "";
   return { v1, h2, h3 };
+}
+
+// ---------------------------------------------------------------------------
+// Personal-note line detection
+//
+// Any line whose first non-whitespace character(s) is `*` or `//` is a
+// personal note — completely dropped from the doc before any other
+// parsing happens. Notes never reach the VO TTS, the Notion filming
+// notes, or even the script preview. Examples:
+//
+//   * à valider avec le client
+//   // TODO: refaire le hook 3
+//   ** Important: ne pas oublier la musique
+//
+// A `*` in the middle of a normal sentence (e.g. "Buy 1 * pack") stays
+// untouched — the detection only triggers when `*` is the very first
+// non-space character.
+// ---------------------------------------------------------------------------
+
+export function isPersonalNoteLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("*")) return true;
+  if (trimmed.startsWith("//")) return true;
+  return false;
 }

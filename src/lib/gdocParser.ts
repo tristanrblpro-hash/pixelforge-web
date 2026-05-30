@@ -93,17 +93,25 @@ const AVATARS_REGEX =
 const LABEL_LINE_REGEX_G =
   /^[ \t]*(?:Script(?:\s+(?:Original|V1))?|Body|Corps|Texte\s+parl[ée])[ \t]*[:.]?[ \t]*$/gim;
 
-// Captures one of the three trailing hook headers. Tolerant of:
+// Captures one of the three trailing hook headers. Very permissive —
+// any reasonable shape the user might write:
+//
 //   - "Ad #1 - X - Hook 1 (Original)"     ← classic
 //   - "Ad #2 - X - Hook 2"                ← without parens
 //   - "Ad#1 — X — Hook 1"                 ← em/en dash and no space
 //   - "Ad #1 - X (Original)"              ← template form, no "Hook 1" word
-// Group 1 = "Ad #N" digit (always captured).
-// Group 2 = explicit "Hook N" digit (undefined when the header used the
-//           "(Original)" form). The matching code falls back to group 1
-//           when group 2 is undefined.
+//   - "Ad #1 (Original)"                  ← minimal form, no title
+//   - "Hook 1 (Original)"                 ← no "Ad #N -" prefix
+//   - "Hook 2"                            ← bare
+//   - "V1 (Original)"                     ← shorthand
+//
+// Group 1 = "Ad #N" digit (optional — undefined if no Ad prefix).
+// Group 2 = explicit "Hook N" digit (undefined when only "(Original)" or
+//           "V1" was used). The matching code resolves the final hook
+//           index using: explicit Hook number → V1/Original = 1 → Ad
+//           number as last fallback.
 const HOOK_HEADER_REGEX_G =
-  /^[ \t]*Ad\s*#?\s*(\d+)\s*[-–—]\s*[^\n]+?(?:[-–—]\s*Hook\s*(\d+)\s*(?:\([^)]*\))?|\s*\(Original\))[ \t]*$/gim;
+  /^[ \t]*(?:Ad\s*#?\s*(\d+)\s*[-–—]\s*[^\n]*?\s*[-–—]?\s*)?(?:Hook\s*(\d+)|V\s*1|\(Original\))(?:\s*\([^)]*\))?[ \t]*[:.]?[ \t]*$/gim;
 
 export function parseGoogleDoc(text: string): ParseResult {
   const warnings: string[] = [];
@@ -166,15 +174,20 @@ function parseAdBlock(
     creativeRef = creativeRef.replace(/[.,;)]+$/, "");
   }
 
-  // 1b. Per-hook avatar counts (optional).
+  // 1b. Per-hook avatar counts (optional). If the value is just template
+  //     placeholders (e.g. "V1=[ ], H2=[ ], H3=[ ]"), we silently fall
+  //     back to the modal's default slider instead of nagging the user.
   let avatarsPerHook: [number, number, number] | undefined;
   const avMatch = block.match(AVATARS_REGEX);
   if (avMatch) {
-    avatarsPerHook = parseAvatarLine(avMatch[1]) ?? undefined;
-    if (!avatarsPerHook) {
-      warnings.push(
-        `${briefName} : ligne "Avatars: ..." illisible (essai: "V1=2, H2=1, H3=0" ou "2 / 1 / 0").`,
-      );
+    const rawValue = avMatch[1];
+    if (!isTemplatePlaceholder(rawValue)) {
+      avatarsPerHook = parseAvatarLine(rawValue) ?? undefined;
+      if (!avatarsPerHook) {
+        warnings.push(
+          `${briefName} : ligne "Avatars: ..." illisible (essai: "V1=2, H2=1, H3=0" ou "2 / 1 / 0").`,
+        );
+      }
     }
   }
 
@@ -219,12 +232,21 @@ function parseAdBlock(
   const hookNotesByIdx: Record<1 | 2 | 3, string[]> = { 1: [], 2: [], 3: [] };
   for (let i = 0; i < hookMatches.length; i++) {
     const hm = hookMatches[i];
-    // Group 2 = explicit "Hook N" digit. When absent (the "(Original)"
-    // form), fall back to group 1 = the "Ad #N" digit, since by
-    // convention Ad #1 = V1, Ad #2 = H2, Ad #3 = H3.
+    // Resolve the hook index:
+    //   - group 2 = explicit "Hook N" digit → use it
+    //   - else the matched header used "(Original)" or "V1" → hook = 1
+    //   - else fall back to group 1 = "Ad #N" digit (Ad #1=V1, etc.)
     const explicitHook = hm[2] ? Number(hm[2]) : NaN;
-    const adNumber = Number(hm[1]);
-    const hookIdx = Number.isFinite(explicitHook) ? explicitHook : adNumber;
+    let hookIdx: number;
+    if (Number.isFinite(explicitHook)) {
+      hookIdx = explicitHook;
+    } else if (/\(Original\)|V\s*1/i.test(hm[0])) {
+      hookIdx = 1;
+    } else if (hm[1]) {
+      hookIdx = Number(hm[1]);
+    } else {
+      continue;
+    }
     if (hookIdx !== 1 && hookIdx !== 2 && hookIdx !== 3) continue;
     const start = (hm.index ?? 0) + hm[0].length;
     const end =
@@ -240,9 +262,14 @@ function parseAdBlock(
         if (clean) hookNotesByIdx[hookIdx as 1 | 2 | 3].push(clean);
         continue;
       }
-      // First non-note, non-empty line is the quoted opening.
+      // First non-note, non-empty line is the quoted opening — unless
+      // it's still a template placeholder like "[   ]", in which case
+      // we treat it as empty (the user hasn't filled it in yet).
       if (!openingTaken) {
-        hookLines[hookIdx] = stripQuotes(trimmed);
+        const cleaned = stripQuotes(trimmed);
+        if (!isTemplatePlaceholder(cleaned)) {
+          hookLines[hookIdx] = cleaned;
+        }
         openingTaken = true;
       }
     }
@@ -254,7 +281,11 @@ function parseAdBlock(
     hookNotesByIdx[3],
   ];
 
-  if (!hookLines[1]) warnings.push(`${briefName} : Hook 1 (Original) manquant.`);
+  // Hook 1's line is intentionally NOT required: V1's VO uses the full
+  // body of the original script (not just the opening), so a missing
+  // Hook 1 line doesn't actually break anything. We only warn for Hook 2
+  // / Hook 3 because those are stand-alone openings that drive their
+  // own VO renders.
   if (!hookLines[2]) warnings.push(`${briefName} : Hook 2 manquant.`);
   if (!hookLines[3]) warnings.push(`${briefName} : Hook 3 manquant.`);
 
@@ -353,6 +384,39 @@ function parseAvatarLine(raw: string): [number, number, number] | null {
 function clampAvatar(n: number): number | null {
   if (Number.isNaN(n) || n < 0) return null;
   return Math.min(5, n);
+}
+
+// ---------------------------------------------------------------------------
+// Template placeholder detection
+//
+// The user works from a Google Doc template that contains placeholders
+// like "[   ]" or "[Title]" that should be replaced when filling in a
+// brief. When a placeholder is left empty, we treat the field as "not
+// specified" silently — no warning, no crash, just defaults kick in.
+//
+// A value is a placeholder if it's:
+//   - empty after trimming
+//   - made of nothing but []/brackets, whitespace, and known structural
+//     markers (V1/H2/H3/=/, etc. for the Avatars line)
+//   - just "[" + anything + "]"
+// ---------------------------------------------------------------------------
+
+function isTemplatePlaceholder(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return true;
+  // Strip out everything that looks like a [bracket placeholder] —
+  // including with whitespace inside. If what's left has no actual
+  // content (just commas, slashes, labels, etc.), it's a template.
+  const withoutBrackets = trimmed.replace(/\[[^\]]*\]/g, "").trim();
+  if (!withoutBrackets) return true;
+  // After stripping brackets, what remains should contain at least one
+  // digit OR a real word (not just labels like "V1=" or punctuation).
+  // We consider it a placeholder if there are no digits AND no
+  // lowercase letters (labels like "V1=" are uppercase-only).
+  if (!/\d/.test(withoutBrackets) && !/[a-z]/.test(withoutBrackets)) {
+    return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------

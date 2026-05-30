@@ -27,6 +27,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ClipboardPaste,
   ExternalLink,
   Image as ImageIcon,
   Loader2,
@@ -50,6 +51,7 @@ import {
   upsertBrief,
 } from "@/lib/briefs";
 import { runVoiceoverBatch, type VoBatchJob } from "@/lib/voiceoverBatch";
+import { GdocImportModal } from "@/components/GdocImportModal";
 
 // ---------------------------------------------------------------------------
 // Local types
@@ -159,6 +161,9 @@ export function BriefBatchWizard() {
   // Sync state
   const [syncState, setSyncState] = useState<Map<string, SyncCellState>>(new Map());
 
+  // Google Doc import modal
+  const [gdocOpen, setGdocOpen] = useState(false);
+
   // ----- Hydrate from sessionStorage on mount -----
   useEffect(() => {
     if (hydrated.current) return;
@@ -244,6 +249,31 @@ export function BriefBatchWizard() {
 
   const patchRow = useCallback((id: string, patch: Partial<DraftRow>) => {
     setRows((rs) => rs.map((r) => (r.rowId === id ? { ...r, ...patch } : r)));
+  }, []);
+
+  // Fired by the Google Doc import modal — created briefs are already in
+  // localStorage, so we just need to push matching DraftRows and jump to
+  // Step 3 (VO) since scripts are already filled.
+  const onGdocImported = useCallback((created: Brief[]) => {
+    if (created.length === 0) return;
+    const nextRows: DraftRow[] = created.map((b) => ({
+      rowId: Math.random().toString(36).slice(2, 10),
+      briefName: parseBriefName(b.adsetName).briefName,
+      creativeName: parseBriefName(b.adsetName).creativeName,
+      avatarCount: b.avatarCount,
+      briefId: b.id,
+    }));
+    setRows(nextRows);
+    setBriefs((m) => {
+      const nm = new Map(m);
+      for (const b of created) nm.set(b.id, b);
+      return nm;
+    });
+    setGdocOpen(false);
+    // Scripts are already in. Jump to VO so the user can immediately start
+    // generating voices — the whole "type each name + paste each script"
+    // loop is skipped.
+    setStep(3);
   }, []);
 
   const commitBriefs = useCallback((): { ok: number; skipped: number } => {
@@ -780,6 +810,7 @@ export function BriefBatchWizard() {
             onAdd={addRow}
             onRemove={removeRow}
             onPatch={patchRow}
+            onOpenGdoc={() => setGdocOpen(true)}
           />
         )}
         {step === 2 && (
@@ -828,6 +859,15 @@ export function BriefBatchWizard() {
           />
         )}
       </div>
+
+      {/* Google Doc import modal */}
+      {gdocOpen && (
+        <GdocImportModal
+          defaultAvatarCount={rows[0]?.avatarCount ?? 0}
+          onClose={() => setGdocOpen(false)}
+          onImported={onGdocImported}
+        />
+      )}
 
       {/* Sticky bottom nav */}
       <div className="sticky bottom-4 z-10 bg-pf-bg/95 backdrop-blur-md border border-pf-border rounded-2xl px-5 py-3.5 flex items-center justify-between shadow-xl shadow-black/40">
@@ -950,11 +990,13 @@ function Step1Briefs({
   onAdd,
   onRemove,
   onPatch,
+  onOpenGdoc,
 }: {
   rows: DraftRow[];
   onAdd: () => void;
   onRemove: (id: string) => void;
   onPatch: (id: string, patch: Partial<DraftRow>) => void;
+  onOpenGdoc: () => void;
 }) {
   const lastCreativeRef = useRef<HTMLInputElement>(null);
 
@@ -964,6 +1006,34 @@ function Step1Briefs({
         title="Liste tes briefs pour la semaine"
         body="Une ligne = un brief = 3 vidéos (V1 + 2 hooks). Le nom du brief + le nom de la créa formeront le titre. Avatars IA : 0 si pas besoin."
       />
+
+      {/* Google Doc import shortcut — the fastest path. */}
+      <button
+        type="button"
+        onClick={onOpenGdoc}
+        className="w-full bg-gradient-to-br from-pf-accent/15 via-pf-accent/5 to-transparent border border-pf-accent/40 hover:border-pf-accent rounded-2xl p-5 flex items-center gap-4 text-left transition-colors group"
+      >
+        <div className="w-12 h-12 rounded-xl bg-pf-accent/20 border border-pf-accent/40 text-pf-accent flex items-center justify-center shrink-0">
+          <ClipboardPaste size={20} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-base font-bold mb-0.5">
+            Importer depuis un Google Doc
+          </div>
+          <p className="text-sm text-pf-dim leading-relaxed">
+            Colle ton doc complet → on crée TOUS les briefs + scripts + hooks +
+            ref en un coup. Tu passes direct à l&apos;étape Voix off.
+          </p>
+        </div>
+        <ArrowRight
+          size={18}
+          className="text-pf-accent shrink-0 group-hover:translate-x-1 transition-transform"
+        />
+      </button>
+
+      <div className="text-center text-xs text-pf-muted uppercase tracking-wider font-semibold">
+        — ou saisis manuellement —
+      </div>
 
       <div className="bg-pf-elev border border-pf-border rounded-2xl divide-y divide-pf-border overflow-hidden">
         <div className="grid grid-cols-[1fr_1.4fr_140px_48px] gap-4 px-5 py-3 bg-pf-soft text-xs uppercase tracking-wider text-pf-muted font-bold">
@@ -2040,4 +2110,15 @@ function composeAdsetName(briefName: string, creativeName: string): string {
   const b = creativeName.trim();
   if (a && b) return `${a} — ${b}`;
   return a || b || "Brief sans titre";
+}
+
+// Inverse of composeAdsetName for imports/hydration: split an adsetName
+// like "Ad Test #12 - Anti-Fake Dermato" back into its two parts. Falls
+// back to putting everything in briefName if no separator found.
+function parseBriefName(adsetName: string): { briefName: string; creativeName: string } {
+  const m = adsetName.match(/^(.+?)\s*[-–—]\s*(.+)$/);
+  if (m) {
+    return { briefName: m[1].trim(), creativeName: m[2].trim() };
+  }
+  return { briefName: adsetName.trim(), creativeName: "" };
 }

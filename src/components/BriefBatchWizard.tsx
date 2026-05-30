@@ -199,21 +199,45 @@ export function BriefBatchWizard() {
   }, [step, rows, voState, lipsyncState]);
 
   // ----- Refresh briefs map from localStorage on focus -----
-  // (cut-silence may have updated cutVoUrl while we were navigated away)
+  // /cut-silence may have written a cleaned URL into a hook's cutVoUrl
+  // while the user was navigated away. We refresh both the briefs map
+  // AND the in-memory voState URLs so the audio player picks up the
+  // new file without needing a hard reload.
   useEffect(() => {
-    const onFocus = () => {
+    const refresh = () => {
       const all = loadBriefs();
+      const fresh = new Map<string, Brief>();
       setBriefs((prev) => {
-        const nm = new Map<string, Brief>();
         for (const [id] of prev) {
           const b = all.find((x) => x.id === id);
-          if (b) nm.set(id, b);
+          if (b) fresh.set(id, b);
+        }
+        return fresh;
+      });
+      // Sync voState entries with the new hook.cutVoUrl values so the
+      // render's `h.cutVoUrl || s?.url` precedence always agrees with
+      // localStorage.
+      setVoState((prev) => {
+        const nm = new Map(prev);
+        for (const [id, brief] of fresh) {
+          for (const h of brief.hooks) {
+            if (!h.cutVoUrl) continue;
+            const key = `${id}:${h.id}`;
+            const existing = nm.get(key);
+            if (existing?.url !== h.cutVoUrl) {
+              nm.set(key, { status: "done", url: h.cutVoUrl });
+            }
+          }
         }
         return nm;
       });
     };
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
   }, []);
 
   // ----- Fetch voices once -----
@@ -863,7 +887,6 @@ export function BriefBatchWizard() {
       {/* Google Doc import modal */}
       {gdocOpen && (
         <GdocImportModal
-          defaultAvatarCount={rows[0]?.avatarCount ?? 0}
           onClose={() => setGdocOpen(false)}
           onImported={onGdocImported}
         />
@@ -1450,7 +1473,14 @@ function Step3Voiceover({
                 {hookRows.map((h) => {
                   const key = `${b.id}:${h.id}`;
                   const s = voState.get(key);
-                  const url = s?.url || h.cutVoUrl;
+                  // Prefer the localStorage URL over the in-memory voState
+                  // URL. `hook.cutVoUrl` is the single source of truth
+                  // (written by both the batch VO generator AND the
+                  // /cut-silence attach flow), so when the user comes
+                  // back from cut-silence, the cleaned audio wins —
+                  // otherwise the stale voState URL from the original
+                  // generation would still be displayed.
+                  const url = h.cutVoUrl || s?.url;
                   const status: VoCellStatus = s?.status ?? (url ? "done" : "idle");
                   const hookLabel = h.index === 1 ? "V1" : `Hook ${h.index}`;
                   return (
@@ -1492,7 +1522,7 @@ function Step3Voiceover({
                         </div>
                         {url ? (
                           // eslint-disable-next-line jsx-a11y/media-has-caption
-                          <audio controls src={url} className="w-full h-9" />
+                          <audio key={url} controls src={url} className="w-full h-9" />
                         ) : (
                           <p className="text-sm text-pf-muted line-clamp-2 leading-relaxed">
                             {h.hookScript.slice(0, 120)}

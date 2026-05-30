@@ -29,18 +29,14 @@ import {
 // ---------------------------------------------------------------------------
 
 type Props = {
-  /** Default avatar count applied to every created brief. The user can
-   *  still tweak per row in Step 1 after import. */
-  defaultAvatarCount: number;
   onClose: () => void;
   /** Called with the list of brief IDs created in localStorage. The wizard
    *  uses this to push DraftRows and jump to a later step. */
   onImported: (briefs: Brief[]) => void;
 };
 
-export function GdocImportModal({ defaultAvatarCount, onClose, onImported }: Props) {
+export function GdocImportModal({ onClose, onImported }: Props) {
   const [raw, setRaw] = useState("");
-  const [avatarCount, setAvatarCount] = useState(defaultAvatarCount);
   const [importing, setImporting] = useState(false);
 
   // Live-parse as the user types/pastes.
@@ -63,11 +59,11 @@ export function GdocImportModal({ defaultAvatarCount, onClose, onImported }: Pro
       for (const ad of parsed.ads) {
         const adsetName = `${ad.briefName} - ${ad.creativeName}`.trim();
         // If the doc specifies per-hook avatar counts, use them as the
-        // authoritative shape; otherwise fall back to the modal's
-        // default slider applied uniformly. brief.avatarCount holds the
-        // max so legacy uniform-resize calls don't crop the largest hook.
+        // authoritative shape; otherwise default to 0 (no avatars).
+        // brief.avatarCount holds the max across the 3 hooks so legacy
+        // uniform-resize calls don't crop the largest hook.
         const perHook = ad.avatarsPerHook;
-        const briefAvatarMax = perHook ? Math.max(...perHook) : avatarCount;
+        const briefAvatarMax = perHook ? Math.max(...perHook) : 0;
         const b = newBrief({ avatarCount: briefAvatarMax, adsetName });
         b.creativeRef = ad.creativeRef;
         const { v1, h2, h3 } = buildHookScripts(ad);
@@ -161,35 +157,9 @@ export function GdocImportModal({ defaultAvatarCount, onClose, onImported }: Pro
         <div className="flex-1 grid grid-cols-1 md:grid-cols-2 overflow-hidden">
           {/* Paste column */}
           <div className="border-r border-pf-border p-5 flex flex-col gap-3 overflow-hidden">
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-bold uppercase tracking-wider text-pf-muted">
-                Colle le doc ici
-              </label>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-pf-muted" title="Utilisé seulement quand le doc ne contient pas de ligne 'Avatars : V1=…, H2=…, H3=…'">
-                  Avatars/brief par défaut :
-                </span>
-                <div className="flex items-center gap-1 bg-pf-bg border border-pf-border rounded-md p-0.5">
-                  <button
-                    type="button"
-                    onClick={() => setAvatarCount(Math.max(0, avatarCount - 1))}
-                    className="w-7 h-7 rounded text-pf-muted hover:text-pf-text hover:bg-pf-soft flex items-center justify-center"
-                  >
-                    −
-                  </button>
-                  <span className="font-mono text-base font-bold w-7 text-center">
-                    {avatarCount}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setAvatarCount(Math.min(5, avatarCount + 1))}
-                    className="w-7 h-7 rounded text-pf-muted hover:text-pf-text hover:bg-pf-soft flex items-center justify-center"
-                  >
-                    +
-                  </button>
-                </div>
-              </div>
-            </div>
+            <label className="text-sm font-bold uppercase tracking-wider text-pf-muted">
+              Colle le doc ici
+            </label>
             <textarea
               value={raw}
               onChange={(e) => setRaw(e.target.value)}

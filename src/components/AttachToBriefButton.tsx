@@ -40,9 +40,57 @@ import {
   type HookBrief,
   applyAttach,
   attachTargetLabel,
+  clearAttach,
+  getAttachValue,
   loadBrief,
   loadBriefs,
 } from "@/lib/briefs";
+
+// ---------------------------------------------------------------------------
+// Fill-state helpers — used by the picker to show "filled X/Y" badges at
+// every level (brief / hook / slot) so the user immediately sees what's
+// already attached before they click and accidentally overwrite something.
+// Counts are RELATIVE to the asset kind being attached.
+// ---------------------------------------------------------------------------
+
+type FillCount = { filled: number; total: number };
+
+function hookFillForKind(hook: HookBrief, kind: AttachTarget["kind"]): FillCount {
+  if (kind === "mainVo") {
+    return { filled: hook.mainVoUrl ? 1 : 0, total: 1 };
+  }
+  if (kind === "cutVo") {
+    return { filled: hook.cutVoUrl ? 1 : 0, total: 1 };
+  }
+  // Avatar-bound slots — one per avatar in the hook.
+  const total = hook.avatars.length;
+  let filled = 0;
+  for (const a of hook.avatars) {
+    if (kind === "avatarClip" && a.voClipUrl) filled++;
+    else if (kind === "avatarImage" && a.imageUrl) filled++;
+    else if (kind === "avatarLipsync" && a.lipsyncVideoUrl) filled++;
+  }
+  return { filled, total };
+}
+
+// Roll-up across the 3 hooks. Useful for the brief row preview, where
+// the picker shows "Images 4/6" before the user even picks a hook.
+function briefFillForKind(brief: Brief, kinds: AttachTarget["kind"][]): FillCount {
+  let filled = 0;
+  let total = 0;
+  for (const h of brief.hooks) {
+    for (const k of kinds) {
+      const c = hookFillForKind(h, k);
+      filled += c.filled;
+      total += c.total;
+    }
+  }
+  return { filled, total };
+}
+
+function briefHasAvatars(b: Brief): boolean {
+  return b.hooks.some((h) => h.avatars.length > 0);
+}
 
 // ---------------------------------------------------------------------------
 // Asset model — what the caller hands over. The picker derives which target
@@ -228,13 +276,13 @@ export function AttachDialog({ asset, onClose, onAttached }: DialogProps) {
 
   const validKinds = useMemo(() => targetsForKind(asset.kind), [asset.kind]);
 
-  // When brief/hook changes, reset kind to the first that's available given
-  // the brief's avatar count.
+  // When brief/hook changes, reset kind to the first that's available
+  // given the brief's avatar configuration (which may vary per hook).
   useEffect(() => {
     if (!briefId) return;
     const b = briefs.find((x) => x.id === briefId);
     if (!b) return;
-    const hasAvatars = b.avatarCount > 0;
+    const hasAvatars = briefHasAvatars(b);
     const firstKind = validKinds.find((k) => {
       if (k === "mainVo" || k === "cutVo") return true;
       return hasAvatars;
@@ -272,17 +320,33 @@ export function AttachDialog({ asset, onClose, onAttached }: DialogProps) {
     !!kind &&
     (kind === "mainVo" || kind === "cutVo" || !!avatarId);
 
+  // The currently-targeted slot (if the user has narrowed down enough)
+  // and whatever's already in it. Drives the "Rempli / Vide" preview
+  // block below the picker AND the "Rattacher" vs "Remplacer" submit
+  // label so the user always knows what they're about to do.
+  const currentTarget: AttachTarget | null = useMemo(() => {
+    if (!brief || !hook || !kind) return null;
+    if (kind === "mainVo" || kind === "cutVo") {
+      return { kind, briefId: brief.id, hookId: hook.id };
+    }
+    if (!avatarId) return null;
+    return { kind, briefId: brief.id, hookId: hook.id, avatarId };
+  }, [brief, hook, kind, avatarId]);
+
+  const currentValue = useMemo(
+    () => (currentTarget ? getAttachValue(currentTarget) : null),
+    // We also want this to re-run after a clear / attach.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [currentTarget, briefs],
+  );
+  const slotFilled = !!currentValue?.url;
+
   const handleSubmit = useCallback(() => {
-    if (!brief || !hook || !kind) return;
+    if (!currentTarget) return;
     setSubmitting(true);
     setError(null);
     try {
-      const target: AttachTarget =
-        kind === "mainVo" || kind === "cutVo"
-          ? { kind, briefId: brief.id, hookId: hook.id }
-          : { kind, briefId: brief.id, hookId: hook.id, avatarId: avatarId! };
-
-      const result = applyAttach(target, {
+      const result = applyAttach(currentTarget, {
         url: asset.url,
         voiceName: asset.voiceName,
         text: asset.text,
@@ -294,12 +358,21 @@ export function AttachDialog({ asset, onClose, onAttached }: DialogProps) {
         setSubmitting(false);
         return;
       }
-      onAttached(target);
+      onAttached(currentTarget);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setSubmitting(false);
     }
-  }, [asset, avatarId, brief, hook, kind, onAttached]);
+  }, [asset, currentTarget, onAttached]);
+
+  const handleClear = useCallback(() => {
+    if (!currentTarget) return;
+    const r = clearAttach(currentTarget);
+    if (r) {
+      // Refresh local briefs state so currentValue recomputes empty.
+      setBriefs(loadBriefs());
+    }
+  }, [currentTarget]);
 
   // ----- Render
 
@@ -351,6 +424,7 @@ export function AttachDialog({ asset, onClose, onAttached }: DialogProps) {
                     <BriefRow
                       key={b.id}
                       brief={b}
+                      validKinds={validKinds}
                       active={b.id === briefId}
                       onPick={() => {
                         setBriefId(b.id);
@@ -368,6 +442,7 @@ export function AttachDialog({ asset, onClose, onAttached }: DialogProps) {
                       <HookChip
                         key={h.id}
                         hook={h}
+                        validKinds={validKinds}
                         active={h.id === hookId}
                         onPick={() => setHookId(h.id)}
                       />
@@ -389,6 +464,19 @@ export function AttachDialog({ asset, onClose, onAttached }: DialogProps) {
                     onPickAvatar={setAvatarId}
                   />
                 </Section>
+              )}
+
+              {/* Current-slot preview — shows what's already attached at
+                  the resolved target (if anything) so the user knows
+                  before clicking Rattacher whether it's a fresh write
+                  or an overwrite. The "Vider" button frees the slot
+                  in-place. */}
+              {currentTarget && slotFilled && currentValue && (
+                <SlotPreview
+                  asset={asset}
+                  value={currentValue}
+                  onClear={handleClear}
+                />
               )}
 
               {error && (
@@ -414,14 +502,23 @@ export function AttachDialog({ asset, onClose, onAttached }: DialogProps) {
               type="button"
               onClick={handleSubmit}
               disabled={!canSubmit || submitting}
-              className="bg-pf-accent text-pf-accent-fg font-semibold rounded-md px-4 py-2 text-sm inline-flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-pf-accent/90 transition-colors"
+              className={`font-semibold rounded-md px-4 py-2 text-sm inline-flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${
+                slotFilled
+                  ? "bg-pf-warn text-pf-bg hover:bg-pf-warn/90"
+                  : "bg-pf-accent text-pf-accent-fg hover:bg-pf-accent/90"
+              }`}
+              title={
+                slotFilled
+                  ? "Ce slot contient déjà un asset — il sera remplacé."
+                  : undefined
+              }
             >
               {submitting ? (
                 <Loader2 size={14} className="animate-spin" />
               ) : (
                 <Check size={14} />
               )}
-              Rattacher
+              {slotFilled ? "Remplacer" : "Rattacher"}
             </button>
           </div>
         )}
@@ -447,15 +544,20 @@ function Section({ label, children }: { label: string; children: React.ReactNode
 
 function BriefRow({
   brief,
+  validKinds,
   active,
   onPick,
 }: {
   brief: Brief;
+  validKinds: AttachTarget["kind"][];
   active: boolean;
   onPick: () => void;
 }) {
-  const hasAvatars = brief.avatarCount > 0;
+  const hasAvatars = briefHasAvatars(brief);
   const Icon = hasAvatars ? Users : FileText;
+  // Aggregate fill across the 3 hooks for the asset type being attached.
+  const fill = briefFillForKind(brief, validKinds);
+  const allFilled = fill.total > 0 && fill.filled === fill.total;
   return (
     <button
       type="button"
@@ -478,25 +580,54 @@ function BriefRow({
       <div className="flex-1 min-w-0">
         <div className="text-sm font-medium truncate">{brief.adsetName}</div>
         <div className="text-[10px] text-pf-muted font-mono">
-          {hasAvatars ? `3 hooks × ${brief.avatarCount} av.` : "3 hooks"}
+          3 hooks{hasAvatars ? ` · ${totalAvatars(brief)} avatars` : ""}
         </div>
       </div>
+      {fill.total > 0 && (
+        <span
+          className={`shrink-0 text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border ${
+            allFilled
+              ? "bg-pf-ok/15 text-pf-ok border-pf-ok/40"
+              : fill.filled > 0
+                ? "bg-pf-warn/15 text-pf-warn border-pf-warn/40"
+                : "bg-pf-soft text-pf-muted border-pf-border"
+          }`}
+          title={`${fill.filled} slot(s) rempli(s) sur ${fill.total} pour cet asset`}
+        >
+          {fill.filled}/{fill.total}
+        </span>
+      )}
       {active && <Check size={14} className="text-pf-accent shrink-0" />}
     </button>
   );
 }
 
+function totalAvatars(b: Brief): number {
+  return b.hooks.reduce((acc, h) => acc + h.avatars.length, 0);
+}
+
 function HookChip({
   hook,
+  validKinds,
   active,
   onPick,
 }: {
   hook: HookBrief;
+  validKinds: AttachTarget["kind"][];
   active: boolean;
   onPick: () => void;
 }) {
   const label = hook.index === 1 ? "V1" : `Hook ${hook.index}`;
-  const filled = !!hook.cutVoUrl || !!hook.hookScript.trim();
+  // Aggregate fill for the asset type across this hook's slots.
+  let filled = 0;
+  let total = 0;
+  for (const k of validKinds) {
+    const c = hookFillForKind(hook, k);
+    filled += c.filled;
+    total += c.total;
+  }
+  const allFilled = total > 0 && filled === total;
+  const someFilled = filled > 0 && !allFilled;
   return (
     <button
       type="button"
@@ -507,13 +638,15 @@ function HookChip({
           : "border-pf-border bg-pf-bg hover:border-pf-accent/60 text-pf-text"
       }`}
     >
-      {label}
-      {filled && (
-        <span
-          className={`absolute top-1 right-1 w-1.5 h-1.5 rounded-full ${
-            active ? "bg-pf-accent" : "bg-pf-ok"
+      <div>{label}</div>
+      {total > 0 && (
+        <div
+          className={`text-[10px] font-mono mt-0.5 ${
+            allFilled ? "text-pf-ok" : someFilled ? "text-pf-warn" : "text-pf-muted"
           }`}
-        />
+        >
+          {filled}/{total}
+        </div>
       )}
     </button>
   );
@@ -538,12 +671,12 @@ function SlotPicker({
   onPickKind: (k: AttachTarget["kind"]) => void;
   onPickAvatar: (id: string) => void;
 }) {
-  const hasAvatars = brief.avatarCount > 0;
-
-  // Hide avatar-requiring slots when the brief has no avatars
+  // Hide avatar-requiring slots when the hook has no avatars (per-hook
+  // avatar counts can vary, so we check the actual hook not the brief).
+  const hookHasAvatars = hook.avatars.length > 0;
   const offered = validKinds.filter((k) => {
     if (k === "avatarClip" || k === "avatarImage" || k === "avatarLipsync") {
-      return hasAvatars;
+      return hookHasAvatars;
     }
     return true;
   });
@@ -551,9 +684,9 @@ function SlotPicker({
   if (offered.length === 0) {
     return (
       <div className="bg-pf-bg border border-dashed border-pf-border rounded-lg px-3 py-3 text-xs text-pf-dim">
-        Ce brief n&apos;a aucun avatar IA configuré.{" "}
+        Ce hook n&apos;a aucun avatar IA configuré.{" "}
         {asset.kind === "image" || asset.kind === "video"
-          ? "Augmente le nombre d'avatars dans le brief pour pouvoir rattacher cet asset."
+          ? "Choisis un autre hook ou ajoute des avatars dans le wizard du brief."
           : "Cet asset n'a pas de slot compatible."}
       </div>
     );
@@ -562,14 +695,18 @@ function SlotPicker({
   return (
     <div className="space-y-2.5">
       <div className="grid grid-cols-2 gap-2">
-        {offered.map((k) => (
-          <KindChip
-            key={k}
-            kind={k}
-            active={k === kind}
-            onPick={() => onPickKind(k)}
-          />
-        ))}
+        {offered.map((k) => {
+          const c = hookFillForKind(hook, k);
+          return (
+            <KindChip
+              key={k}
+              kind={k}
+              fill={c}
+              active={k === kind}
+              onPick={() => onPickKind(k)}
+            />
+          );
+        })}
       </div>
 
       {kind &&
@@ -577,20 +714,37 @@ function SlotPicker({
           <div className="space-y-1.5">
             <div className="text-[11px] text-pf-muted">Avatar :</div>
             <div className="grid grid-cols-3 gap-2">
-              {hook.avatars.map((a, i) => (
-                <button
-                  key={a.id}
-                  type="button"
-                  onClick={() => onPickAvatar(a.id)}
-                  className={`text-xs rounded-md border-2 px-2 py-1.5 truncate transition-colors ${
-                    a.id === avatarId
-                      ? "border-pf-accent bg-pf-accent/15 text-pf-accent"
-                      : "border-pf-border bg-pf-bg hover:border-pf-accent/60"
-                  }`}
-                >
-                  Avt {i + 1}
-                </button>
-              ))}
+              {hook.avatars.map((a, i) => {
+                const filled =
+                  (kind === "avatarClip" && !!a.voClipUrl) ||
+                  (kind === "avatarImage" && !!a.imageUrl) ||
+                  (kind === "avatarLipsync" && !!a.lipsyncVideoUrl);
+                const isActive = a.id === avatarId;
+                return (
+                  <button
+                    key={a.id}
+                    type="button"
+                    onClick={() => onPickAvatar(a.id)}
+                    className={`relative text-xs rounded-md border-2 px-2 py-1.5 truncate transition-colors ${
+                      isActive
+                        ? "border-pf-accent bg-pf-accent/15 text-pf-accent"
+                        : filled
+                          ? "border-pf-ok/40 bg-pf-ok/10 text-pf-text hover:border-pf-ok"
+                          : "border-pf-border bg-pf-bg hover:border-pf-accent/60"
+                    }`}
+                    title={filled ? "Cet avatar a déjà cet asset" : undefined}
+                  >
+                    Avt {i + 1}
+                    {filled && (
+                      <span
+                        className={`absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full ${
+                          isActive ? "bg-pf-accent" : "bg-pf-ok"
+                        }`}
+                      />
+                    )}
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}
@@ -600,29 +754,118 @@ function SlotPicker({
 
 function KindChip({
   kind,
+  fill,
   active,
   onPick,
 }: {
   kind: AttachTarget["kind"];
+  fill: FillCount;
   active: boolean;
   onPick: () => void;
 }) {
   const label = attachTargetLabel(kind);
+  const allFilled = fill.total > 0 && fill.filled === fill.total;
+  const someFilled = fill.filled > 0 && !allFilled;
   return (
     <button
       type="button"
       onClick={onPick}
-      className={`text-xs rounded-lg border-2 px-2.5 py-2 text-left transition-colors ${
+      className={`relative text-xs rounded-lg border-2 px-2.5 py-2 text-left transition-colors ${
         active
           ? "border-pf-accent bg-pf-accent/15 text-pf-accent"
-          : "border-pf-border bg-pf-bg hover:border-pf-accent/60 text-pf-text"
+          : allFilled
+            ? "border-pf-ok/40 bg-pf-ok/10 text-pf-text hover:border-pf-ok"
+            : "border-pf-border bg-pf-bg hover:border-pf-accent/60 text-pf-text"
       }`}
     >
-      <div className="flex items-center gap-1.5">
-        <KindIcon kind={kind} />
-        <span className="font-medium truncate">{label}</span>
+      <div className="flex items-center justify-between gap-1.5">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <KindIcon kind={kind} />
+          <span className="font-medium truncate">{label}</span>
+        </div>
+        {fill.total > 1 && (
+          <span
+            className={`text-[10px] font-mono shrink-0 ${
+              allFilled ? "text-pf-ok" : someFilled ? "text-pf-warn" : "text-pf-muted"
+            }`}
+          >
+            {fill.filled}/{fill.total}
+          </span>
+        )}
+        {fill.total === 1 && fill.filled === 1 && (
+          <span className="w-1.5 h-1.5 rounded-full bg-pf-ok shrink-0" />
+        )}
       </div>
     </button>
+  );
+}
+
+// Shows the asset currently sitting in the selected slot, plus a button
+// to clear it. Replaces the "are you sure you want to overwrite?" prompt
+// with an explicit "see what's there, vide it, then attach" affordance.
+function SlotPreview({
+  asset,
+  value,
+  onClear,
+}: {
+  asset: AttachableAsset;
+  value: { url?: string; meta?: string };
+  onClear: () => void;
+}) {
+  if (!value.url) return null;
+  const isImage = asset.kind === "image";
+  const isAudio = asset.kind === "audio";
+  return (
+    <div className="bg-pf-warn/10 border border-pf-warn/40 rounded-lg p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[11px] uppercase tracking-wider text-pf-warn font-bold">
+          Slot déjà rempli
+        </div>
+        <button
+          type="button"
+          onClick={onClear}
+          className="inline-flex items-center gap-1 text-[11px] font-semibold bg-pf-soft border border-pf-border hover:border-pf-danger text-pf-text hover:text-pf-danger rounded-md px-2 py-1 transition-colors"
+          title="Vider ce slot. Tu peux ensuite rattacher cet asset à la place."
+        >
+          <X size={11} />
+          Vider
+        </button>
+      </div>
+      <div className="flex items-start gap-3">
+        {isImage && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={value.url}
+            alt="Asset actuel"
+            className="w-16 h-16 rounded-md object-cover border border-pf-border shrink-0"
+          />
+        )}
+        {isAudio && (
+          // eslint-disable-next-line jsx-a11y/media-has-caption
+          <audio src={value.url} controls className="flex-1 h-8" />
+        )}
+        {!isImage && !isAudio && (
+          <a
+            href={value.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs text-pf-accent hover:underline truncate flex-1"
+          >
+            {value.url}
+          </a>
+        )}
+        {value.meta && (
+          <div className="text-[11px] text-pf-dim flex-1 min-w-0 leading-snug line-clamp-3">
+            {value.meta}
+          </div>
+        )}
+      </div>
+      <div className="text-[11px] text-pf-dim leading-snug">
+        Cliquer <strong>Remplacer</strong> en bas pour écraser cet asset par le
+        nouveau, ou <strong>Vider</strong> ci-dessus pour libérer le slot sans
+        rien rattacher.
+      </div>
+    </div>
   );
 }
 

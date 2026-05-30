@@ -437,3 +437,77 @@ export function applyAttach(
   }
   return upsertBrief(brief);
 }
+
+// Inspect the current value at a target slot WITHOUT mutating anything.
+// Returns null if the brief/hook/avatar can't be found; otherwise a tiny
+// summary that the AttachToBriefButton picker uses to show "Rempli" vs
+// "Vide" state per slot, plus a thumbnail-able URL when relevant.
+export function getAttachValue(
+  target: AttachTarget,
+): { url?: string; meta?: string } | null {
+  const brief = loadBrief(target.briefId);
+  if (!brief) return null;
+  const hook = brief.hooks.find((h) => h.id === target.hookId);
+  if (!hook) return null;
+  if (target.kind === "mainVo") {
+    return { url: hook.mainVoUrl, meta: hook.mainVoVoiceName };
+  }
+  if (target.kind === "cutVo") {
+    return {
+      url: hook.cutVoUrl,
+      meta:
+        typeof hook.cutVoDurationSec === "number"
+          ? `${hook.cutVoDurationSec.toFixed(1)}s`
+          : undefined,
+    };
+  }
+  const av = hook.avatars.find((a) => a.id === target.avatarId);
+  if (!av) return null;
+  if (target.kind === "avatarClip") {
+    return { url: av.voClipUrl, meta: av.voClipText?.slice(0, 60) };
+  }
+  if (target.kind === "avatarImage") {
+    return { url: av.imageUrl, meta: av.imagePrompt?.slice(0, 60) };
+  }
+  if (target.kind === "avatarLipsync") {
+    return { url: av.lipsyncVideoUrl };
+  }
+  return null;
+}
+
+// Inverse of applyAttach: nulls out the slot at the given target.
+// Used by the AttachToBriefButton modal's "Vider" affordance so the
+// user can free a slot before attaching a new asset (or remove one
+// they mistakenly attached). Returns the updated brief or null.
+export function clearAttach(target: AttachTarget): Brief | null {
+  const brief = loadBrief(target.briefId);
+  if (!brief) return null;
+  const hook = brief.hooks.find((h) => h.id === target.hookId);
+  if (!hook) return null;
+  if (target.kind === "mainVo") {
+    hook.mainVoUrl = undefined;
+    hook.mainVoVoiceName = undefined;
+  } else if (target.kind === "cutVo") {
+    hook.cutVoUrl = undefined;
+    hook.cutVoDurationSec = undefined;
+  } else if (target.kind === "avatarClip") {
+    const av = hook.avatars.find((a) => a.id === target.avatarId);
+    if (!av) return null;
+    av.voClipUrl = undefined;
+    av.voClipText = undefined;
+  } else if (target.kind === "avatarImage") {
+    const av = hook.avatars.find((a) => a.id === target.avatarId);
+    if (!av) return null;
+    av.imageUrl = undefined;
+    av.imagePrompt = undefined;
+  } else if (target.kind === "avatarLipsync") {
+    const av = hook.avatars.find((a) => a.id === target.avatarId);
+    if (!av) return null;
+    av.lipsyncVideoUrl = undefined;
+    av.lipsyncStatus = "idle";
+    av.lipsyncError = undefined;
+    av.lipsyncBatchId = undefined;
+    av.lipsyncTaskId = undefined;
+  }
+  return upsertBrief(brief);
+}

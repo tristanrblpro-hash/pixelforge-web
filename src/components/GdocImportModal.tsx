@@ -5,11 +5,12 @@
 // briefs in one click. Used by Step 1 of BriefBatchWizard to skip the
 // whole "type each name, type each script" loop.
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Check,
   ClipboardPaste,
+  Copy,
   FileText,
   Loader2,
   Sparkles,
@@ -477,11 +478,91 @@ const LEGEND_ITEMS: LegendItem[] = [
   },
 ];
 
+// Plain-text version of the legend — what gets copied to the clipboard.
+// Designed to render readably as-is in Google Docs / Notion / a plain text
+// editor. Kept in sync with LEGEND_ITEMS but with examples so the user
+// can paste it as a header in their own scripts doc.
+const LEGEND_PLAINTEXT = `=== CONVENTIONS DU DOC PIXELFORGE ===
+
+1. *  → Note perso
+   Ligne totalement ignorée (ni VO, ni Notion).
+   Ex: * à valider avec le client
+
+2. >  → Note monteur
+   Atterrit dans Filming notes Notion, par hook.
+   Ex: > Couper silence après "patch"
+
+3. EN MAJUSCULES → Setup vidéo / scène
+   Ligne courte entièrement majuscule = indication de tournage.
+   Strippée du VO, affichée dans Filming notes.
+   Ex: HOMME DERMATO LUNETTE #1 :
+
+4. Référence: / Avatars: → Métadonnées du brief
+   Référence: <URL>            (créa concurrente à répliquer)
+   Avatars: V1=2, H2=1, H3=0   (nb d'avatars par hook, 0 OK)
+
+5. Ad #N → Headers de hook
+   Ad Test #1 - <Créa>          (titre du brief, obligatoire)
+   Ad #1 - <Créa> (Original)    (= V1, script complet)
+   Ad #2 - <Créa> - Hook 2      (variante d'ouverture seule)
+   Ad #3 - <Créa> - Hook 3      (variante d'ouverture seule)
+`;
+
 function Legend() {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(LEGEND_PLAINTEXT);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback for older browsers / restricted contexts.
+      const ta = document.createElement("textarea");
+      ta.value = LEGEND_PLAINTEXT;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy");
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } catch {
+        /* nothing else to do — clipboard refused */
+      }
+      document.body.removeChild(ta);
+    }
+  }, []);
+
   return (
     <div className="border-b border-pf-border bg-pf-bg/40 px-6 py-3">
-      <div className="text-[11px] uppercase tracking-wider text-pf-muted font-bold mb-2">
-        Conventions du doc
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-[11px] uppercase tracking-wider text-pf-muted font-bold">
+          Conventions du doc
+        </div>
+        <button
+          type="button"
+          onClick={handleCopy}
+          className={`inline-flex items-center gap-1.5 text-xs font-semibold rounded-md px-2.5 py-1 border transition-colors ${
+            copied
+              ? "bg-pf-ok/15 border-pf-ok/50 text-pf-ok"
+              : "bg-pf-soft border-pf-border text-pf-dim hover:border-pf-accent hover:text-pf-text"
+          }`}
+          title="Copier la légende complète (à coller dans ton Google Doc / Notion)"
+        >
+          {copied ? (
+            <>
+              <Check size={12} className="pf-success-pop" />
+              Copié
+            </>
+          ) : (
+            <>
+              <Copy size={12} />
+              Copier la légende
+            </>
+          )}
+        </button>
       </div>
       <ol className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
         {LEGEND_ITEMS.map((it, i) => (

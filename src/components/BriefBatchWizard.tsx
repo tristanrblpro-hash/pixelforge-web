@@ -1299,7 +1299,7 @@ function Step2Scripts({
                 <div className="min-w-0">
                   <div className="text-base font-bold truncate">{b.adsetName}</div>
                   <div className="text-sm text-pf-muted font-mono">
-                    {b.hooks.filter((h) => drafts[`${b.id}:${h.id}:script`]?.trim()).length} / 3 scripts
+                    {b.hooks.filter((h) => drafts[`${b.id}:${h.id}:script`]?.trim()).length} / {b.hooks.length} scripts
                   </div>
                 </div>
               </div>
@@ -2060,7 +2060,7 @@ function Step6Sync({
                 <div className="min-w-0">
                   <div className="text-base font-bold truncate">{b.adsetName}</div>
                   <div className="text-sm text-pf-muted font-mono mt-0.5">
-                    3 hooks
+                    {b.hooks.length} hook{b.hooks.length > 1 ? "s" : ""}
                     {totalLs > 0 ? ` · ${totalLs} avatar${totalLs > 1 ? "s" : ""}` : ""}
                   </div>
                 </div>
@@ -2070,8 +2070,8 @@ function Step6Sync({
               </div>
 
               <div className="space-y-2 my-4">
-                <ChecklineRow label="Scripts" done={filledHooks} total={3} />
-                <ChecklineRow label="Voix off" done={filledVo} total={3} />
+                <ChecklineRow label="Scripts" done={filledHooks} total={b.hooks.length} />
+                <ChecklineRow label="Voix off" done={filledVo} total={b.hooks.length} />
                 {totalLs > 0 && (
                   <ChecklineRow label="Lipsyncs" done={doneLs} total={totalLs} />
                 )}

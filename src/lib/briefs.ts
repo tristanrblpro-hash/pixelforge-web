@@ -125,15 +125,18 @@ function newHook(index: number, avatarCount: number): HookBrief {
 }
 
 // Brief universel — un seul type de brief, avatarCount = 0 signifie pas
-// d'avatar IA (l'étape correspondante du wizard est masquée). Le champ
-// `template` reste dans le type pour la rétro-compat des briefs en
-// localStorage, mais devient un détail dérivé d'avatarCount.
+// d'avatar IA. hookCount peut aller de 1 à 50 (la plupart des cas: 3,
+// mais l'import depuis un Google Doc peut détecter jusqu'à 20+ hooks).
+// Le champ `template` reste dans le type pour la rétro-compat des
+// briefs en localStorage, mais devient un détail dérivé d'avatarCount.
 export function newBrief(options?: {
   avatarCount?: number;
   adsetName?: string;
+  hookCount?: number;
 }): Brief {
   const ts = Date.now();
   const avatarCount = Math.max(0, Math.min(5, options?.avatarCount ?? 0));
+  const hookCount = Math.max(1, Math.min(50, options?.hookCount ?? 3));
   const template: BriefTemplate = avatarCount > 0 ? "avatar" : "simple";
   const adsetName =
     options?.adsetName?.trim() ||
@@ -144,7 +147,7 @@ export function newBrief(options?: {
     adsetName,
     baseScript: "",
     avatarCount,
-    hooks: [1, 2, 3].map((i) => newHook(i, avatarCount)),
+    hooks: Array.from({ length: hookCount }, (_, i) => newHook(i + 1, avatarCount)),
     createdAt: ts,
     updatedAt: ts,
     currentStepId: "setup",

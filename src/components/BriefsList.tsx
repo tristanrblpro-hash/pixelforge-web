@@ -90,7 +90,7 @@ export function BriefsList() {
       <div className="flex items-center justify-between pt-2">
         <h2 className="text-sm font-semibold text-pf-text">Mes briefs</h2>
         <span className="text-xs text-pf-muted">
-          {briefs.length} brief{briefs.length > 1 ? "s" : ""} · 1 brief = 3 hooks
+          {briefs.length} brief{briefs.length > 1 ? "s" : ""} · 1 brief = autant de hooks que ton script
         </span>
       </div>
 
@@ -102,7 +102,8 @@ export function BriefsList() {
           <div className="text-sm font-semibold mb-1">Aucun brief encore</div>
           <p className="text-xs text-pf-muted max-w-sm mx-auto">
             Lance un batch pour préparer ta semaine, ou crée un brief unique
-            pour démarrer. 3 hooks seront générés automatiquement à l&apos;intérieur.
+            pour démarrer. Par défaut 3 hooks (l&apos;import d&apos;un Google Doc détecte
+            automatiquement le bon nombre, jusqu&apos;à 50).
           </p>
         </div>
       ) : (
@@ -146,7 +147,7 @@ function AvatarPicker({
         </div>
 
         <p className="text-xs text-pf-dim mb-5 leading-relaxed">
-          Le nombre s&apos;applique aux 3 hooks. Choisis{" "}
+          Le nombre s&apos;applique à tous les hooks (3 par défaut). Choisis{" "}
           <span className="text-pf-text font-medium">0</span> si tu n&apos;utilises
           pas d&apos;avatar IA pour ce brief — l&apos;étape correspondante sera
           masquée.
@@ -236,7 +237,8 @@ function BriefCard({ brief, onDelete }: { brief: Brief; onDelete: () => void }) 
       </div>
       <div className="text-sm font-semibold truncate">{brief.adsetName}</div>
       <div className="text-[11px] text-pf-muted font-mono mt-0.5">
-        {hasAvatars ? `3 hooks × ${brief.avatarCount} avatars` : "3 hooks"} ·{" "}
+        {brief.hooks.length} hook{brief.hooks.length > 1 ? "s" : ""}
+        {hasAvatars ? ` × ${brief.avatarCount} avatars` : ""} ·{" "}
         {new Date(brief.updatedAt).toLocaleDateString()}
       </div>
       <div className="mt-3 h-1 bg-pf-soft rounded-full overflow-hidden">

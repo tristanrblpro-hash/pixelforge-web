@@ -83,12 +83,18 @@ export function BatchResumeBanner() {
     };
   }, [pathname]);
 
-  // Hide on the batch page itself + when there's no active state + when
-  // the user clicked the × to dismiss it for this session.
-  const onBatchPage = pathname === "/briefs/batch";
+  // Visible on EVERY page as soon as a batch session exists in
+  // sessionStorage — the user wants a permanent "come back to the
+  // batch" affordance, including from /briefs/batch itself (where
+  // it doubles as a quick "go to top / completion overview" link).
+  // The only suppressions are: no active state, or user-dismissed.
   const hasBriefs =
     !!state && Array.isArray(state.rows) && state.rows.some((r) => r.briefId);
-  if (onBatchPage || !state || !hasBriefs || dismissed) return null;
+  if (!state || !hasBriefs || dismissed) return null;
+  // Touch pathname so the effect's dependency tree re-evaluates on
+  // every client-side route change (otherwise tsc warns and the banner
+  // info would lag a frame after nav).
+  void pathname;
 
   const step = Math.max(1, Math.min(6, state.step));
   const stepLabel = STEP_LABELS.find((s) => s.id === step)?.label ?? "";

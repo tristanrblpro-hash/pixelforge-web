@@ -58,25 +58,46 @@ export function GdocImportModal({ onClose, onImported }: Props) {
       const created: Brief[] = [];
       for (const ad of parsed.ads) {
         const adsetName = `${ad.briefName} - ${ad.creativeName}`.trim();
-        // If the doc specifies per-hook avatar counts, use them as the
-        // authoritative shape; otherwise default to 0 (no avatars).
-        // brief.avatarCount holds the max across the 3 hooks so legacy
-        // uniform-resize calls don't crop the largest hook.
-        const perHook = ad.avatarsPerHook;
-        const briefAvatarMax = perHook ? Math.max(...perHook) : 0;
-        const b = newBrief({ avatarCount: briefAvatarMax, adsetName });
+        // hookCount comes directly from the doc — the parser detected
+        // 1..N hooks via "Ad #N - … - Hook N" headers (and "(Original)"
+        // for Hook 1). At least 1 (V1) always exists.
+        const hookCount = Math.max(1, ad.hookLines.length);
+
+        // Per-hook avatar counts. If "Avatars : V1=2, H2=1, …" was in
+        // the doc, use that array (expanded/truncated to hookCount).
+        // Otherwise default to 0 avatars on every hook (the user can
+        // bump it later in Step 1 or in the per-brief wizard).
+        const perHookRaw = ad.avatarsPerHook;
+        let perHook: number[] | undefined;
+        if (perHookRaw) {
+          if (perHookRaw.length === 1) {
+            // Uniform value → broadcast to every hook
+            perHook = Array.from({ length: hookCount }, () => perHookRaw[0]);
+          } else {
+            // Pad with 0 if fewer entries than hooks; truncate if more.
+            perHook = Array.from(
+              { length: hookCount },
+              (_, i) => perHookRaw[i] ?? 0,
+            );
+          }
+        }
+        const briefAvatarMax = perHook ? Math.max(...perHook, 0) : 0;
+
+        const b = newBrief({ avatarCount: briefAvatarMax, adsetName, hookCount });
         b.creativeRef = ad.creativeRef;
-        const { v1, h2, h3 } = buildHookScripts(ad);
-        if (b.hooks[0]) b.hooks[0].hookScript = v1;
-        if (b.hooks[1]) b.hooks[1].hookScript = h2;
-        if (b.hooks[2]) b.hooks[2].hookScript = h3;
-        b.baseScript = v1; // store for reference
+
+        // Scripts: V1 = full body, Hook 2+ = standalone opening lines.
+        const scripts = buildHookScripts(ad);
+        for (let i = 0; i < b.hooks.length; i++) {
+          b.hooks[i].hookScript = scripts[i] ?? "";
+        }
+        b.baseScript = scripts[0] ?? ""; // V1 as the reference body
 
         // Resize each hook's avatar slots independently when the doc
         // specifies per-hook counts. newBrief sized everything uniformly
-        // to briefAvatarMax above; we re-trim/grow per hook here.
+        // to briefAvatarMax above; re-trim/grow per hook here.
         if (perHook) {
-          for (let i = 0; i < 3; i++) {
+          for (let i = 0; i < b.hooks.length; i++) {
             const target = perHook[i];
             const hook = b.hooks[i];
             if (!hook) continue;
@@ -92,10 +113,9 @@ export function GdocImportModal({ onClose, onImported }: Props) {
 
         // Compose each hook's filming notes from the parsed content:
         //   - Scene setups (UPPERCASE markers from V1 body) — shared
-        //     across the 3 hooks since the video structure is the same.
+        //     across all hooks since the video structure is the same.
         //   - Per-hook monteur notes (lines starting with `>`).
-        // Both feed into Notion's "Filming notes" block via hook.notes.
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < b.hooks.length; i++) {
           const hook = b.hooks[i];
           if (!hook) continue;
           const personalNotes = ad.hookNotes[i] ?? [];
@@ -112,8 +132,10 @@ export function GdocImportModal({ onClose, onImported }: Props) {
   };
 
   const adsCount = parsed.ads.length;
-  const okCount = parsed.ads.filter(
-    (a) => a.hook1Line && a.hook2Line && a.hook3Line,
+  // "Complete" = every hook (V1 + the higher ones) has its opening line
+  // OR is V1 (which is always implicitly complete since its body covers it).
+  const okCount = parsed.ads.filter((a) =>
+    a.hookLines.every((line, idx) => idx === 0 || !!line.trim()),
   ).length;
 
   return (
@@ -271,7 +293,11 @@ export function GdocImportModal({ onClose, onImported }: Props) {
 // ---------------------------------------------------------------------------
 
 function AdPreview({ ad }: { ad: ParsedAd }) {
-  const complete = !!ad.hook1Line && !!ad.hook2Line && !!ad.hook3Line;
+  // "Complete" = V1 (always implicit via the body) + every Hook 2+ has
+  // its opening line filled. Empty hook arrays still count as complete
+  // (a brief with only V1 is a valid edge case).
+  const complete = ad.hookLines.every((line, idx) => idx === 0 || !!line.trim());
+  const hookCount = ad.hookLines.length;
   return (
     <div
       className={`bg-pf-bg border rounded-xl p-3.5 ${
@@ -282,6 +308,9 @@ function AdPreview({ ad }: { ad: ParsedAd }) {
         <div className="min-w-0">
           <div className="text-sm font-bold truncate">
             {ad.briefName} — {ad.creativeName}
+          </div>
+          <div className="text-[10px] text-pf-muted font-mono mt-0.5">
+            {hookCount} hook{hookCount > 1 ? "s" : ""} détecté{hookCount > 1 ? "s" : ""}
           </div>
           {ad.creativeRef && (
             <a
@@ -306,18 +335,27 @@ function AdPreview({ ad }: { ad: ParsedAd }) {
         )}
       </div>
 
-      <div className="space-y-1 text-xs">
-        <HookLine n={1} label="Hook 1 (Original)" line={ad.hook1Line} />
-        <HookLine n={2} label="Hook 2" line={ad.hook2Line} />
-        <HookLine n={3} label="Hook 3" line={ad.hook3Line} />
+      <div className="space-y-1 text-xs max-h-[180px] overflow-y-auto pr-1">
+        {ad.hookLines.map((line, idx) => (
+          <HookLine
+            key={idx}
+            n={idx + 1}
+            label={idx === 0 ? "Hook 1 (Original)" : `Hook ${idx + 1}`}
+            line={line}
+          />
+        ))}
       </div>
 
-      {ad.avatarsPerHook && (
-        <div className="mt-1.5 flex items-center gap-1.5 text-[11px]">
+      {ad.avatarsPerHook && ad.avatarsPerHook.length > 0 && (
+        <div className="mt-1.5 flex items-center gap-1.5 text-[11px] flex-wrap">
           <span className="text-pf-muted">Avatars :</span>
-          <AvatarChip label="V1" n={ad.avatarsPerHook[0]} />
-          <AvatarChip label="H2" n={ad.avatarsPerHook[1]} />
-          <AvatarChip label="H3" n={ad.avatarsPerHook[2]} />
+          {ad.avatarsPerHook.map((n, idx) => (
+            <AvatarChip
+              key={idx}
+              label={idx === 0 ? "V1" : `H${idx + 1}`}
+              n={n}
+            />
+          ))}
         </div>
       )}
 
@@ -444,7 +482,7 @@ const LEGEND_ITEMS: LegendItem[] = [
     marker: "Ad #N",
     chipClass: "bg-pf-soft text-pf-text border-pf-border",
     title: "Headers de hook",
-    body: 'Ad #1 (Original) = V1. Ad #2 - Hook 2 / Ad #3 - Hook 3 = variantes.',
+    body: "Ad #1 (Original) = V1. Ad #2..N - Hook N = variantes. Autant de hooks que tu en mets dans le doc (jusqu'à 50).",
   },
 ];
 
@@ -471,11 +509,13 @@ const LEGEND_PLAINTEXT = `=== CONVENTIONS DU DOC PIXELFORGE ===
    Référence: <URL>            (créa concurrente à répliquer)
    Avatars: V1=2, H2=1, H3=0   (nb d'avatars par hook, 0 OK)
 
-5. Ad #N → Headers de hook
+5. Ad #N → Headers de hook (1 à 50, détecté automatiquement)
    Ad Test #1 - <Créa>          (titre du brief, obligatoire)
    Ad #1 - <Créa> (Original)    (= V1, script complet)
    Ad #2 - <Créa> - Hook 2      (variante d'ouverture seule)
    Ad #3 - <Créa> - Hook 3      (variante d'ouverture seule)
+   …                            (autant de Ad #N - Hook N que ton script)
+   Ad #7 - <Créa> - Hook 7      (par exemple, hook 7)
 `;
 
 function Legend() {

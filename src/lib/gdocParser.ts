@@ -49,20 +49,28 @@ export type ParsedAd = {
    *  appeared. Drop these into hook.notes so the monteur sees them as
    *  "Filming notes" in Notion without polluting the script. */
   scenes: string[];
-  hook1Line?: string;
-  hook2Line?: string;
-  hook3Line?: string;
-  /** Number of AI avatars per hook, in order [V1, H2, H3]. Parsed from an
-   *  "Avatars : V1=2, H2=1, H3=0" line (multiple syntaxes accepted). If
-   *  absent, undefined → the import flow falls back to its default
-   *  slider value for the whole brief. */
-  avatarsPerHook?: [number, number, number];
-  /** Monteur instructions per hook, in order [V1, H2, H3]. Lines that
-   *  start with `>` inside the body (→ V1) or inside a hook section
-   *  (→ that hook) are collected here. The import flow merges them
-   *  with the scene setups into hook.notes (Notion "Filming notes"). */
-  hookNotes: [string[], string[], string[]];
+  /** Hook opening lines, indexed by hook number - 1.
+   *  hookLines[0] = Hook 1 (Original) — also stored as v1Script's first
+   *  sentence. hookLines[1] = Hook 2, hookLines[2] = Hook 3, etc.
+   *  Length is dynamic: the parser reads as many "Ad #N - … - Hook N"
+   *  blocks as the doc contains (1 to 50). Indexes without a line in
+   *  the doc are filled with "". */
+  hookLines: string[];
+  /** Number of AI avatars per hook, indexed same as hookLines.
+   *  Parsed from an "Avatars : V1=2, H2=1, H3=0, H4=2…" line (multiple
+   *  syntaxes accepted). If absent, undefined → the import flow falls
+   *  back to its default slider value for the whole brief. */
+  avatarsPerHook?: number[];
+  /** Monteur instructions per hook, indexed same as hookLines. Lines
+   *  that start with `>` inside the body (→ V1) or inside a hook
+   *  section (→ that hook) are collected here. The import flow merges
+   *  them with the scene setups into hook.notes (Notion "Filming notes"). */
+  hookNotes: string[][];
 };
+
+/** Cap so we don't accidentally create thousands of hooks on a malformed
+ *  doc. The user mentioned briefs with up to ~20 hooks, so 50 is plenty. */
+const MAX_HOOKS = 50;
 
 export type ParseResult = {
   ads: ParsedAd[];
@@ -177,7 +185,10 @@ function parseAdBlock(
   // 1b. Per-hook avatar counts (optional). If the value is just template
   //     placeholders (e.g. "V1=[ ], H2=[ ], H3=[ ]"), we silently fall
   //     back to the modal's default slider instead of nagging the user.
-  let avatarsPerHook: [number, number, number] | undefined;
+  //     Parsed length can be 1 (uniform value applied to all hooks)
+  //     or any number ≥ 1 — the import flow pads or truncates to match
+  //     the actual hook count discovered in step 4.
+  let avatarsPerHook: number[] | undefined;
   const avMatch = block.match(AVATARS_REGEX);
   if (avMatch) {
     const rawValue = avMatch[1];
@@ -185,7 +196,7 @@ function parseAdBlock(
       avatarsPerHook = parseAvatarLine(rawValue) ?? undefined;
       if (!avatarsPerHook) {
         warnings.push(
-          `${briefName} : ligne "Avatars: ..." illisible (essai: "V1=2, H2=1, H3=0" ou "2 / 1 / 0").`,
+          `${briefName} : ligne "Avatars: ..." illisible (essai: "V1=2, H2=1, H3=0, H4=1…" ou "2 / 1 / 0 / 1").`,
         );
       }
     }
@@ -228,8 +239,12 @@ function parseAdBlock(
   //    The header is matched; the first non-empty non-note line after it
   //    is the quoted opening. Lines that start with `>` anywhere in
   //    that hook's segment are collected as monteur notes for that hook.
-  const hookLines: Record<number, string | undefined> = { 1: undefined, 2: undefined, 3: undefined };
-  const hookNotesByIdx: Record<1 | 2 | 3, string[]> = { 1: [], 2: [], 3: [] };
+  //    The dict-by-index lets us handle ARBITRARY hook counts (1-50)
+  //    — the doc decides how many hooks the brief gets.
+  const linesByIdx: Record<number, string | undefined> = {};
+  const notesByIdx: Record<number, string[]> = {};
+  let maxHookIdx = 0;
+
   for (let i = 0; i < hookMatches.length; i++) {
     const hm = hookMatches[i];
     // Resolve the hook index:
@@ -247,7 +262,10 @@ function parseAdBlock(
     } else {
       continue;
     }
-    if (hookIdx !== 1 && hookIdx !== 2 && hookIdx !== 3) continue;
+    if (hookIdx < 1 || hookIdx > MAX_HOOKS) continue;
+    if (hookIdx > maxHookIdx) maxHookIdx = hookIdx;
+    if (!notesByIdx[hookIdx]) notesByIdx[hookIdx] = [];
+
     const start = (hm.index ?? 0) + hm[0].length;
     const end =
       i + 1 < hookMatches.length ? hookMatches[i + 1].index ?? block.length : block.length;
@@ -259,35 +277,50 @@ function parseAdBlock(
       if (!trimmed) continue;
       if (trimmed.startsWith(">")) {
         const clean = trimmed.replace(/^>+\s*/, "").trim();
-        if (clean) hookNotesByIdx[hookIdx as 1 | 2 | 3].push(clean);
+        if (clean) notesByIdx[hookIdx].push(clean);
         continue;
       }
       // First non-note, non-empty line is the quoted opening — unless
       // it's still a template placeholder like "[   ]", in which case
-      // we treat it as empty (the user hasn't filled it in yet).
+      // we treat it as empty.
       if (!openingTaken) {
         const cleaned = stripQuotes(trimmed);
         if (!isTemplatePlaceholder(cleaned)) {
-          hookLines[hookIdx] = cleaned;
+          linesByIdx[hookIdx] = cleaned;
         }
         openingTaken = true;
       }
     }
   }
-  // V1 notes from the body are merged with notes inside Hook 1's section.
-  const finalHookNotes: [string[], string[], string[]] = [
-    [...v1Notes, ...hookNotesByIdx[1]],
-    hookNotesByIdx[2],
-    hookNotesByIdx[3],
-  ];
+
+  // Convert the dict to a dense array sized to the highest hook index
+  // (at least 1 — every brief has V1 even if the doc only describes V1).
+  const totalHooks = Math.max(1, maxHookIdx);
+  const finalHookLines: string[] = [];
+  const finalHookNotes: string[][] = [];
+  for (let idx = 1; idx <= totalHooks; idx++) {
+    finalHookLines.push(linesByIdx[idx] ?? "");
+    const notes = notesByIdx[idx] ?? [];
+    // V1 (idx=1) also receives the body-level monteur notes (lines
+    // starting with `>` that appear in the body before any hook header).
+    if (idx === 1) {
+      finalHookNotes.push([...v1Notes, ...notes]);
+    } else {
+      finalHookNotes.push(notes);
+    }
+  }
 
   // Hook 1's line is intentionally NOT required: V1's VO uses the full
   // body of the original script (not just the opening), so a missing
-  // Hook 1 line doesn't actually break anything. We only warn for Hook 2
-  // / Hook 3 because those are stand-alone openings that drive their
-  // own VO renders.
-  if (!hookLines[2]) warnings.push(`${briefName} : Hook 2 manquant.`);
-  if (!hookLines[3]) warnings.push(`${briefName} : Hook 3 manquant.`);
+  // Hook 1 line doesn't actually break anything. We only warn for
+  // Hook 2+ because those are stand-alone openings that drive their
+  // own VO renders. With dynamic hook counts, we warn for any hook
+  // index ≥ 2 whose opening line is empty.
+  for (let idx = 2; idx <= totalHooks; idx++) {
+    if (!finalHookLines[idx - 1]) {
+      warnings.push(`${briefName} : Hook ${idx} manquant.`);
+    }
+  }
 
   return {
     briefName,
@@ -295,9 +328,7 @@ function parseAdBlock(
     creativeRef,
     v1Script: body,
     scenes,
-    hook1Line: hookLines[1],
-    hook2Line: hookLines[2],
-    hook3Line: hookLines[3],
+    hookLines: finalHookLines,
     avatarsPerHook,
     hookNotes: finalHookNotes,
   };
@@ -326,56 +357,56 @@ function extractMonteurNotes(text: string): { spoken: string; notes: string[] } 
 // ---------------------------------------------------------------------------
 // "Avatars : ..." parser
 //
-// Accepted forms (numbers 0..5, clamped):
-//   "V1=2, H2=1, H3=0"                    (labeled — recommended)
-//   "V1: 2, Hook 2: 1, Hook 3: 0"
+// Returns an array of avatar counts indexed by hook (V1 at index 0).
+// Accepted forms (each digit clamped to 0..5):
+//   "V1=2, H2=1, H3=0"              (labeled — supports H1..H50)
+//   "V1: 2, Hook 2: 1, Hook 3: 0, Hook 7: 1"
 //   "Hook 1=2, Hook 2=1, Hook 3=0"
-//   "2 / 1 / 0"                            (slash-separated, V1/H2/H3)
-//   "2, 1, 0"                              (comma-separated)
-//   "2"                                    (uniform: applied to all 3)
-// Returns null if nothing parseable.
+//   "2 / 1 / 0 / 1 / 1 / 0 / 0"      (slash-separated, V1, H2, H3…)
+//   "2, 1, 0"                         (comma-separated)
+//   "2"                               (uniform — caller expands to all hooks)
+// Returns null if nothing parseable. Returns [n] (length 1) for the
+// uniform case so the caller knows to broadcast.
 // ---------------------------------------------------------------------------
 
-function parseAvatarLine(raw: string): [number, number, number] | null {
+function parseAvatarLine(raw: string): number[] | null {
   const s = raw.trim();
   if (!s) return null;
 
-  // 1. Labeled form (V1=2, H2=1, ...)
-  const labeled: Record<1 | 2 | 3, number | undefined> = { 1: undefined, 2: undefined, 3: undefined };
-  const labelRegex = /(V\s*1|Hook\s*1|H1|V\s*2|Hook\s*2|H2|V\s*3|Hook\s*3|H3)\s*[:=]\s*(\d+)/gi;
+  // 1. Labeled form (V1=2, H2=1, H7=1, ...) — supports arbitrary indices.
+  //    Captures both the index digit AND the avatar count.
+  const labeled: Record<number, number> = {};
+  const labelRegex = /(?:V\s*|Hook\s*|H)(\d{1,2})\s*[:=]\s*(\d+)/gi;
   let any = false;
   for (const m of s.matchAll(labelRegex)) {
-    const tag = m[1].toUpperCase().replace(/\s+/g, "");
+    const idx = parseInt(m[1], 10);
+    if (!Number.isFinite(idx) || idx < 1 || idx > 50) continue;
     const n = clampAvatar(parseInt(m[2], 10));
     if (n === null) continue;
-    if (tag === "V1" || tag === "HOOK1" || tag === "H1") {
-      labeled[1] = n;
-      any = true;
-    } else if (tag === "V2" || tag === "HOOK2" || tag === "H2") {
-      labeled[2] = n;
-      any = true;
-    } else if (tag === "V3" || tag === "HOOK3" || tag === "H3") {
-      labeled[3] = n;
-      any = true;
-    }
+    labeled[idx] = n;
+    any = true;
   }
   if (any) {
-    return [labeled[1] ?? 0, labeled[2] ?? 0, labeled[3] ?? 0];
+    const maxIdx = Math.max(...Object.keys(labeled).map(Number));
+    const out: number[] = [];
+    for (let i = 1; i <= maxIdx; i++) out.push(labeled[i] ?? 0);
+    return out;
   }
 
-  // 2. Slash or comma-separated triplet.
+  // 2. Slash or comma-separated list. ≥2 numbers required so we don't
+  //    mis-classify a single-digit single value here.
   const parts = s.split(/[\/,]/).map((p) => p.trim()).filter(Boolean);
-  if (parts.length === 3 && parts.every((p) => /^\d+$/.test(p))) {
+  if (parts.length >= 2 && parts.every((p) => /^\d+$/.test(p))) {
     const nums = parts.map((p) => clampAvatar(parseInt(p, 10)));
     if (nums.every((n): n is number => n !== null)) {
-      return nums as [number, number, number];
+      return nums as number[];
     }
   }
 
-  // 3. Single number → uniform.
+  // 3. Single number → uniform. Caller broadcasts to all hooks.
   if (/^\d+$/.test(s)) {
     const n = clampAvatar(parseInt(s, 10));
-    if (n !== null) return [n, n, n];
+    if (n !== null) return [n];
   }
 
   return null;
@@ -479,29 +510,31 @@ function stripQuotes(s: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Build the 3 hook scripts from a parsed ad.
+// Build the hook scripts from a parsed ad.
 //
 // Workflow convention (set by the user):
-//   - V1 holds the FULL original script (entire body) → the V1 voice off
-//     is the long ~3-4 min recording used as the spine of every variant.
-//   - Hook 2 and Hook 3 hold ONLY their replacement opening line. The
-//     monteur splices the short Hook 2/3 VO at the start of the V1 video
-//     after cutting out V1's own opening. Generating the full body again
-//     for Hooks 2 and 3 would just produce 3 minutes of duplicate audio
-//     for no reason.
+//   - V1 (index 0) holds the FULL original script (entire body) → the
+//     V1 voice off is the long ~3-4 min recording used as the spine of
+//     every variant.
+//   - Hook 2+ (index 1+) hold ONLY their replacement opening line. The
+//     monteur splices the short Hook N VO at the start of the V1 video
+//     after cutting out V1's own opening. Generating the full body
+//     again for Hooks 2+ would just produce 3 minutes of duplicate
+//     audio for no reason.
+//
+// Returns an array sized to ad.hookLines.length (1 to 50). scripts[0] =
+// V1's full body, scripts[i] = hookLines[i] for i ≥ 1.
 // ---------------------------------------------------------------------------
 
-export type HookScripts = {
-  v1: string;
-  h2: string;
-  h3: string;
-};
-
-export function buildHookScripts(ad: ParsedAd): HookScripts {
-  const v1 = ad.v1Script;
-  const h2 = ad.hook2Line ?? "";
-  const h3 = ad.hook3Line ?? "";
-  return { v1, h2, h3 };
+export function buildHookScripts(ad: ParsedAd): string[] {
+  const result: string[] = [];
+  // V1 always carries the full body, regardless of whether hookLines[0]
+  // (= the Hook 1 / Original line) was parsed out separately.
+  result.push(ad.v1Script);
+  for (let i = 1; i < ad.hookLines.length; i++) {
+    result.push(ad.hookLines[i] ?? "");
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

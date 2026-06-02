@@ -57,6 +57,7 @@ import {
   upsertBrief,
 } from "@/lib/briefs";
 import { runVoiceoverBatch, type VoBatchJob } from "@/lib/voiceoverBatch";
+import { uploadFileToStorage } from "@/lib/uploadFile";
 import { GdocImportModal } from "@/components/GdocImportModal";
 import { UploadAndAttachButton } from "@/components/AttachToBriefButton";
 
@@ -648,16 +649,10 @@ export function BriefBatchWizard() {
   // thumbnail / fill state updates in-place without a router refresh.
   const uploadImageToAvatar = useCallback(
     async (briefId: string, hookId: string, avatarId: string, file: File) => {
-      const form = new FormData();
-      form.append("file", file);
-      const r = await fetch("/api/upload", { method: "POST", body: form });
-      const data = (await r.json()) as { url?: string; error?: string };
-      if (!r.ok || !data.url) {
-        throw new Error(data.error || `HTTP ${r.status}`);
-      }
+      const url = await uploadFileToStorage(file);
       const updated = applyAttach(
         { kind: "avatarImage", briefId, hookId, avatarId },
-        { url: data.url },
+        { url },
       );
       if (updated) {
         setBriefs((m) => {
@@ -694,16 +689,10 @@ export function BriefBatchWizard() {
   // already, so the same endpoint works for both flows.
   const uploadVoToAvatar = useCallback(
     async (briefId: string, hookId: string, avatarId: string, file: File) => {
-      const form = new FormData();
-      form.append("file", file);
-      const r = await fetch("/api/upload", { method: "POST", body: form });
-      const data = (await r.json()) as { url?: string; error?: string };
-      if (!r.ok || !data.url) {
-        throw new Error(data.error || `HTTP ${r.status}`);
-      }
+      const url = await uploadFileToStorage(file);
       const updated = applyAttach(
         { kind: "avatarClip", briefId, hookId, avatarId },
-        { url: data.url, text: file.name },
+        { url, text: file.name },
       );
       if (updated) {
         setBriefs((m) => {

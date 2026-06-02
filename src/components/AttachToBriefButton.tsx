@@ -47,6 +47,7 @@ import {
   loadBrief,
   loadBriefs,
 } from "@/lib/briefs";
+import { uploadFileToStorage } from "@/lib/uploadFile";
 
 // ---------------------------------------------------------------------------
 // Fill-state helpers — used by the picker to show "filled X/Y" badges at
@@ -958,13 +959,7 @@ export function UploadAndAttachButton({
       setError(null);
       setUploading(true);
       try {
-        const form = new FormData();
-        form.append("file", file);
-        const r = await fetch("/api/upload", { method: "POST", body: form });
-        const data = (await r.json()) as { url?: string; error?: string };
-        if (!r.ok || !data.url) {
-          throw new Error(data.error || `HTTP ${r.status}`);
-        }
+        const url = await uploadFileToStorage(file);
         const kind: AttachableAsset["kind"] =
           kindHint ??
           (file.type.startsWith("video/")
@@ -974,7 +969,7 @@ export function UploadAndAttachButton({
               : "image");
         setPendingAsset({
           kind,
-          url: data.url,
+          url,
           label: file.name,
         });
       } catch (e) {

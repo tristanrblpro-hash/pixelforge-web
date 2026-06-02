@@ -21,7 +21,12 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ArrowRight, Sparkles, X } from "lucide-react";
 
-const STATE_KEY = "pf:batchWizard:v1";
+// Reads the v2 key written by BriefBatchWizard (which itself migrates
+// any leftover v1 state on first load post-deploy). We read v1 as a
+// fallback here for the brief window between deploy and first wizard
+// mount — without migrating, just shifting the step number on the fly.
+const STATE_KEY = "pf:batchWizard:v2";
+const STATE_KEY_LEGACY = "pf:batchWizard:v1";
 const DISMISSED_KEY = "pf:batchWizard:bannerDismissed";
 
 type StepLabel = { id: number; label: string };
@@ -44,11 +49,25 @@ type PersistedBatchState = {
 function readBatchState(): PersistedBatchState | null {
   if (typeof window === "undefined") return null;
   try {
+    // Prefer v2 (current schema after the Avatars-step insertion).
     const raw = window.sessionStorage.getItem(STATE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as PersistedBatchState;
-    if (typeof parsed?.step !== "number") return null;
-    return parsed;
+    if (raw) {
+      const parsed = JSON.parse(raw) as PersistedBatchState;
+      if (typeof parsed?.step === "number") return parsed;
+    }
+    // Fallback: read legacy v1 and shift the step number on the fly so
+    // the banner shows the right label (Briefs=1, Scripts=2 → 3, etc).
+    // Migration to v2 happens in the wizard's loadWizardState when the
+    // user actually visits /briefs/batch; until then the banner just
+    // reads-and-shifts.
+    const rawV1 = window.sessionStorage.getItem(STATE_KEY_LEGACY);
+    if (rawV1) {
+      const v1 = JSON.parse(rawV1) as PersistedBatchState;
+      if (typeof v1?.step !== "number") return null;
+      const shifted = v1.step === 1 ? 1 : Math.min(7, v1.step + 1);
+      return { ...v1, step: shifted };
+    }
+    return null;
   } catch {
     return null;
   }

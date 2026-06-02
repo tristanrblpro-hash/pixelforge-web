@@ -103,7 +103,15 @@ const FAVORITE_VOICE_IDS = [
   "G0yjIg3xY8gEJZkHpjVm",
 ] as const;
 
-const SESSION_STATE_KEY = "pf:batchWizard:v1";
+// v1 → v2 migration was triggered by inserting the new "Avatars" step
+// at position 2, which shifts every later step by +1 (Scripts 2→3,
+// Voix off 3→4, Images 4→5, Lipsync 5→6, Sync 6→7). We bump the key
+// so the migration code can detect old persisted state and transparently
+// teleport users to the correctly-numbered step on first load after
+// deploy — without losing their work-in-progress (rows, voState,
+// lipsyncState all carry over verbatim).
+const SESSION_STATE_KEY_V1 = "pf:batchWizard:v1";
+const SESSION_STATE_KEY = "pf:batchWizard:v2";
 
 // ---------------------------------------------------------------------------
 // SessionStorage persistence — survives a hop to /cut-silence and back
@@ -119,9 +127,30 @@ type PersistedState = {
 function loadWizardState(): PersistedState | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.sessionStorage.getItem(SESSION_STATE_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw) as PersistedState;
+    // Prefer v2 if it exists.
+    const rawV2 = window.sessionStorage.getItem(SESSION_STATE_KEY);
+    if (rawV2) return JSON.parse(rawV2) as PersistedState;
+
+    // Otherwise migrate v1 → v2 in-place. v1 numbered:
+    //   1 Briefs · 2 Scripts · 3 VO · 4 Images · 5 Lipsync · 6 Sync
+    // v2 numbered:
+    //   1 Briefs · 2 Avatars (NEW) · 3 Scripts · 4 VO · 5 Images ·
+    //   6 Lipsync · 7 Sync
+    // So step > 1 shifts by +1; step = 1 stays put.
+    const rawV1 = window.sessionStorage.getItem(SESSION_STATE_KEY_V1);
+    if (!rawV1) return null;
+    const v1 = JSON.parse(rawV1) as PersistedState;
+    const oldStep = Math.max(1, Math.min(6, v1.step));
+    const newStep: StepId = oldStep === 1 ? 1 : ((oldStep + 1) as StepId);
+    const migrated: PersistedState = {
+      step: newStep,
+      rows: v1.rows,
+      voState: v1.voState,
+      lipsyncState: v1.lipsyncState,
+    };
+    window.sessionStorage.setItem(SESSION_STATE_KEY, JSON.stringify(migrated));
+    window.sessionStorage.removeItem(SESSION_STATE_KEY_V1);
+    return migrated;
   } catch {
     return null;
   }

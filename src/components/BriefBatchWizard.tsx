@@ -37,6 +37,7 @@ import {
   RefreshCw,
   Scissors,
   Sparkles,
+  Upload,
   Users,
   Video,
   X,
@@ -45,7 +46,10 @@ import {
 import {
   type AvatarSlot,
   type Brief,
+  type HookBrief,
   MAX_AVATARS_PER_HOOK,
+  applyAttach,
+  clearAttach,
   loadBriefs,
   newBrief,
   safeResizeHookAvatars,
@@ -637,6 +641,54 @@ export function BriefBatchWizard() {
     [briefs],
   );
 
+  // Step 5 (Images) — direct per-avatar handlers used by the new list
+  // view. They delegate to lib/briefs applyAttach / clearAttach so the
+  // exact same semantics as the universal AttachToBriefButton apply.
+  // After every mutation we sync the local briefs Map so the row's
+  // thumbnail / fill state updates in-place without a router refresh.
+  const uploadImageToAvatar = useCallback(
+    async (briefId: string, hookId: string, avatarId: string, file: File) => {
+      const form = new FormData();
+      form.append("file", file);
+      const r = await fetch("/api/upload", { method: "POST", body: form });
+      const data = (await r.json()) as { url?: string; error?: string };
+      if (!r.ok || !data.url) {
+        throw new Error(data.error || `HTTP ${r.status}`);
+      }
+      const updated = applyAttach(
+        { kind: "avatarImage", briefId, hookId, avatarId },
+        { url: data.url },
+      );
+      if (updated) {
+        setBriefs((m) => {
+          const nm = new Map(m);
+          nm.set(briefId, updated);
+          return nm;
+        });
+      }
+    },
+    [],
+  );
+
+  const clearAvatarImage = useCallback(
+    (briefId: string, hookId: string, avatarId: string) => {
+      const updated = clearAttach({
+        kind: "avatarImage",
+        briefId,
+        hookId,
+        avatarId,
+      });
+      if (updated) {
+        setBriefs((m) => {
+          const nm = new Map(m);
+          nm.set(briefId, updated);
+          return nm;
+        });
+      }
+    },
+    [],
+  );
+
   // -----------------------------------------------------------------------
   // Step 6 — Lipsync batch
   // -----------------------------------------------------------------------
@@ -992,6 +1044,8 @@ export function BriefBatchWizard() {
             briefs={committedBriefs}
             onOpenBrief={(id) => router.push(`/briefs/${id}`)}
             onUseHookVoForAvatars={useHookVoForAvatars}
+            onUploadImageToAvatar={uploadImageToAvatar}
+            onClearAvatarImage={clearAvatarImage}
           />
         )}
         {step === 6 && (
@@ -1812,15 +1866,15 @@ function Step5Images({
   briefs,
   onOpenBrief,
   onUseHookVoForAvatars,
+  onUploadImageToAvatar,
+  onClearAvatarImage,
 }: {
   briefs: Brief[];
   onOpenBrief: (id: string) => void;
   onUseHookVoForAvatars: (briefId: string) => void;
+  onUploadImageToAvatar: (briefId: string, hookId: string, avatarId: string, file: File) => Promise<void>;
+  onClearAvatarImage: (briefId: string, hookId: string, avatarId: string) => void;
 }) {
-  // A brief is in scope here if ANY of its hooks needs at least one avatar,
-  // not if brief.avatarCount > 0 — those two diverge when per-hook counts
-  // differ (e.g. V1=2, H2=1, H3=0 → brief.avatarCount=2 but the user only
-  // has 3 avatars total, not 6).
   const withAvatars = briefs.filter((b) =>
     b.hooks.some((h) => h.avatars.length > 0),
   );
@@ -1831,7 +1885,8 @@ function Step5Images({
         <Sparkles size={32} className="mx-auto text-pf-accent mb-4" />
         <h3 className="text-lg font-bold mb-2">Aucun brief avec avatar IA</h3>
         <p className="text-sm text-pf-dim max-w-md mx-auto">
-          Tu as choisi 0 avatar pour tous les briefs. On passe directement au sync.
+          Tu as choisi 0 avatar pour tous les briefs (étape 2). On passe
+          directement au sync.
         </p>
       </div>
     );
@@ -1840,14 +1895,14 @@ function Step5Images({
   return (
     <div className="space-y-5">
       <Intro
-        title="Assigne une image + une voix off à chaque avatar"
-        body="Pour le lipsync il faut UNE image + UN clip vocal par avatar. Génère tes images dans Prompts et tes voix off dans Voiceover, puis utilise « 📎 Rattacher au brief » sur chaque résultat. Tu peux aussi cloner la voix off du hook sur tous ses avatars en un clic."
+        title="Assigne une image à chaque avatar"
+        body="Liste tous les hooks de chaque brief avec leurs avatars. Pour chaque avatar : upload une image depuis ton PC, ou clique « Générer » pour ouvrir le studio. Tu peux revenir à tout moment — les images déjà rattachées restent affichées et préservées."
       />
 
       <div className="flex flex-wrap items-center gap-2">
         <UploadAndAttachButton
-          label="Uploader une image depuis ton PC"
-          className="inline-flex items-center gap-2 bg-pf-accent/15 border border-pf-accent/40 text-pf-accent hover:bg-pf-accent/25 rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors disabled:opacity-40"
+          label="Uploader (avec choix du slot)"
+          className="inline-flex items-center gap-2 bg-pf-soft border border-pf-border hover:border-pf-accent rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors disabled:opacity-40"
         />
         <Link
           href="/prompts"
@@ -1869,81 +1924,286 @@ function Step5Images({
         </Link>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {withAvatars.map((b) => {
-          // True totals: sum of hook.avatars.length across the 3 hooks.
-          const totalSlots = b.hooks.reduce((acc, h) => acc + h.avatars.length, 0);
-          const imagesAssigned = b.hooks.reduce(
-            (acc, h) => acc + h.avatars.filter((a) => a.imageUrl).length,
-            0,
-          );
-          const voAssigned = b.hooks.reduce(
-            (acc, h) => acc + h.avatars.filter((a) => a.voClipUrl).length,
-            0,
-          );
-          const pct = totalSlots === 0 ? 0 : Math.round((imagesAssigned / totalSlots) * 100);
-          const allReady =
-            totalSlots > 0 && imagesAssigned === totalSlots && voAssigned === totalSlots;
-          // Per-hook breakdown for the title — only show non-zero hooks.
-          const breakdown = b.hooks
-            .map((h) => `${h.index === 1 ? "V1" : `H${h.index}`}=${h.avatars.length}`)
-            .filter((s) => !s.endsWith("=0"))
-            .join(" · ");
-          // The "Use hook VO for avatars" shortcut is only useful when at
-          // least one hook has its cutVoUrl AND at least one avatar
-          // without a clip yet — otherwise it's a no-op.
-          const canCloneHookVo = b.hooks.some(
-            (h) =>
-              h.cutVoUrl && h.avatars.some((a) => !a.voClipUrl),
-          );
-          return (
-            <div
-              key={b.id}
-              className={`bg-pf-elev border rounded-2xl p-5 transition-colors ${
-                allReady ? "border-pf-ok/40" : "border-pf-border"
-              }`}
-            >
-              <div className="flex items-start justify-between mb-3">
-                <div className="w-11 h-11 rounded-xl bg-pf-accent/15 border border-pf-accent/30 text-pf-accent flex items-center justify-center">
-                  <Users size={18} />
-                </div>
-                {allReady ? <BadgeOK label="Complet" /> : <Pill label={`${pct}%`} tone="neutral" />}
-              </div>
-              <div className="text-base font-bold truncate">{b.adsetName}</div>
-              <div className="text-sm text-pf-muted font-mono mt-1">
-                {totalSlots} avatar{totalSlots > 1 ? "s" : ""}
-                {breakdown && ` · ${breakdown}`}
-              </div>
+      <div className="space-y-4">
+        {withAvatars.map((b) => (
+          <BriefImageList
+            key={b.id}
+            brief={b}
+            onOpenBrief={onOpenBrief}
+            onUseHookVoForAvatars={onUseHookVoForAvatars}
+            onUploadImageToAvatar={onUploadImageToAvatar}
+            onClearAvatarImage={onClearAvatarImage}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
 
-              <div className="mt-4 space-y-1.5">
-                <ChecklineRow label="Images" done={imagesAssigned} total={totalSlots} />
-                <ChecklineRow label="Clips vocaux avatar" done={voAssigned} total={totalSlots} />
-              </div>
+// One brief = one expandable list of hooks → avatars. Header shows the
+// brief name + per-asset progress; body lists every (hook, avatar) row
+// with inline Upload + Generate + (when filled) Clear actions.
+function BriefImageList({
+  brief,
+  onOpenBrief,
+  onUseHookVoForAvatars,
+  onUploadImageToAvatar,
+  onClearAvatarImage,
+}: {
+  brief: Brief;
+  onOpenBrief: (id: string) => void;
+  onUseHookVoForAvatars: (briefId: string) => void;
+  onUploadImageToAvatar: (briefId: string, hookId: string, avatarId: string, file: File) => Promise<void>;
+  onClearAvatarImage: (briefId: string, hookId: string, avatarId: string) => void;
+}) {
+  const totalSlots = brief.hooks.reduce((acc, h) => acc + h.avatars.length, 0);
+  const imagesAssigned = brief.hooks.reduce(
+    (acc, h) => acc + h.avatars.filter((a) => a.imageUrl).length,
+    0,
+  );
+  const voAssigned = brief.hooks.reduce(
+    (acc, h) => acc + h.avatars.filter((a) => a.voClipUrl).length,
+    0,
+  );
+  const pct = totalSlots === 0 ? 0 : Math.round((imagesAssigned / totalSlots) * 100);
+  const allReady =
+    totalSlots > 0 && imagesAssigned === totalSlots && voAssigned === totalSlots;
+  const canCloneHookVo = brief.hooks.some(
+    (h) => h.cutVoUrl && h.avatars.some((a) => !a.voClipUrl),
+  );
 
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => onOpenBrief(b.id)}
-                  className="inline-flex items-center gap-1.5 text-sm font-semibold bg-pf-accent text-pf-accent-fg rounded-lg px-3.5 py-2 hover:bg-pf-accent/90 transition-colors"
-                >
-                  Ouvrir
-                  <ArrowRight size={13} />
-                </button>
-                {canCloneHookVo && (
-                  <button
-                    type="button"
-                    onClick={() => onUseHookVoForAvatars(b.id)}
-                    className="inline-flex items-center gap-1.5 text-sm font-medium text-pf-dim hover:text-pf-text border border-pf-border hover:border-pf-accent rounded-lg px-3 py-2 transition-colors"
-                    title="Copie la voix off de chaque hook sur tous ses avatars (sans toucher aux clips déjà rattachés)."
-                  >
-                    <Mic size={13} />
-                    Utiliser la VO du hook
-                  </button>
-                )}
-              </div>
+  // Only render hooks that have at least one avatar — empty hooks are
+  // a no-op here (their slot count is 0, so nothing to assign).
+  const hooksWithAvatars = brief.hooks.filter((h) => h.avatars.length > 0);
+
+  return (
+    <div
+      className={`bg-pf-elev border rounded-2xl overflow-hidden ${
+        allReady ? "border-pf-ok/40" : "border-pf-border"
+      }`}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between gap-3 px-5 py-3.5 border-b border-pf-border bg-pf-soft/40">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-10 h-10 rounded-xl bg-pf-accent/15 border border-pf-accent/30 text-pf-accent flex items-center justify-center shrink-0">
+            <Users size={16} />
+          </div>
+          <div className="min-w-0">
+            <div className="text-base font-bold truncate">{brief.adsetName}</div>
+            <div className="text-sm text-pf-muted font-mono mt-0.5">
+              {totalSlots} avatar{totalSlots > 1 ? "s" : ""} ·{" "}
+              <span className={imagesAssigned === totalSlots ? "text-pf-ok" : ""}>
+                {imagesAssigned}/{totalSlots} images
+              </span>
+              {" · "}
+              <span className={voAssigned === totalSlots ? "text-pf-ok" : ""}>
+                {voAssigned}/{totalSlots} VO
+              </span>
             </div>
-          );
-        })}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {canCloneHookVo && (
+            <button
+              type="button"
+              onClick={() => onUseHookVoForAvatars(brief.id)}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-pf-dim hover:text-pf-text border border-pf-border hover:border-pf-accent rounded-md px-2.5 py-1.5 transition-colors"
+              title="Copie la voix off de chaque hook sur tous ses avatars (sans toucher aux clips déjà rattachés)."
+            >
+              <Mic size={12} />
+              VO du hook
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => onOpenBrief(brief.id)}
+            className="inline-flex items-center gap-1.5 text-xs font-semibold text-pf-dim hover:text-pf-text border border-pf-border hover:border-pf-accent rounded-md px-2.5 py-1.5 transition-colors"
+            title="Ouvrir le wizard détaillé du brief"
+          >
+            Wizard
+            <ArrowRight size={11} />
+          </button>
+          {allReady ? <BadgeOK label="Complet" /> : <Pill label={`${pct}%`} tone="neutral" />}
+        </div>
+      </div>
+
+      {/* Hooks list — each hook is a group with its avatars as sub-rows */}
+      <div className="divide-y divide-pf-border">
+        {hooksWithAvatars.map((h) => (
+          <HookAvatarGroup
+            key={h.id}
+            briefId={brief.id}
+            hook={h}
+            onUploadImageToAvatar={onUploadImageToAvatar}
+            onClearAvatarImage={onClearAvatarImage}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function HookAvatarGroup({
+  briefId,
+  hook,
+  onUploadImageToAvatar,
+  onClearAvatarImage,
+}: {
+  briefId: string;
+  hook: HookBrief;
+  onUploadImageToAvatar: (briefId: string, hookId: string, avatarId: string, file: File) => Promise<void>;
+  onClearAvatarImage: (briefId: string, hookId: string, avatarId: string) => void;
+}) {
+  const label = hook.index === 1 ? "V1 — Original" : `Hook ${hook.index}`;
+  const imagesFilled = hook.avatars.filter((a) => a.imageUrl).length;
+  return (
+    <div>
+      {/* Hook sub-header */}
+      <div className="flex items-center gap-3 px-5 py-2.5 bg-pf-bg/40 border-b border-pf-border/60">
+        <span className="inline-flex items-center justify-center text-xs font-bold font-mono text-pf-text bg-pf-soft border border-pf-border rounded-md px-2 py-0.5 min-w-[48px]">
+          {hook.index === 1 ? "V1" : `H${hook.index}`}
+        </span>
+        <div className="text-sm font-semibold text-pf-text">{label}</div>
+        <span className="text-xs text-pf-muted font-mono ml-auto">
+          {imagesFilled}/{hook.avatars.length} images
+        </span>
+      </div>
+      {/* Avatar rows */}
+      <div className="divide-y divide-pf-border/40">
+        {hook.avatars.map((av, idx) => (
+          <AvatarImageRow
+            key={av.id}
+            briefId={briefId}
+            hookId={hook.id}
+            avatar={av}
+            avatarIdx={idx}
+            onUpload={onUploadImageToAvatar}
+            onClear={onClearAvatarImage}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AvatarImageRow({
+  briefId,
+  hookId,
+  avatar,
+  avatarIdx,
+  onUpload,
+  onClear,
+}: {
+  briefId: string;
+  hookId: string;
+  avatar: AvatarSlot;
+  avatarIdx: number;
+  onUpload: (briefId: string, hookId: string, avatarId: string, file: File) => Promise<void>;
+  onClear: (briefId: string, hookId: string, avatarId: string) => void;
+}) {
+  const fileInput = useRef<HTMLInputElement | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handlePick = useCallback(
+    async (file: File) => {
+      setUploading(true);
+      setError(null);
+      try {
+        await onUpload(briefId, hookId, avatar.id, file);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setUploading(false);
+      }
+    },
+    [briefId, hookId, avatar.id, onUpload],
+  );
+
+  const hasImage = !!avatar.imageUrl;
+  const hasVo = !!avatar.voClipUrl;
+
+  return (
+    <div className="flex items-center gap-3 px-5 py-3">
+      {/* Thumbnail or empty placeholder */}
+      <div className="w-14 h-14 rounded-lg border border-pf-border bg-pf-bg shrink-0 flex items-center justify-center overflow-hidden">
+        {hasImage ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={avatar.imageUrl!}
+            alt={avatar.label}
+            className="w-full h-full object-cover"
+          />
+        ) : (
+          <ImageIcon size={20} className="text-pf-muted" />
+        )}
+      </div>
+
+      {/* Label + status */}
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-semibold text-pf-text truncate">
+          Avatar {avatarIdx + 1}
+          {avatar.label && avatar.label !== `Avatar IA ${avatarIdx + 1}` && (
+            <span className="text-pf-muted ml-1.5 font-normal">— {avatar.label}</span>
+          )}
+        </div>
+        <div className="flex items-center gap-3 mt-0.5 text-[11px] font-mono">
+          <span className={hasImage ? "text-pf-ok" : "text-pf-muted"}>
+            {hasImage ? "✓ Image" : "— Image"}
+          </span>
+          <span className={hasVo ? "text-pf-ok" : "text-pf-muted"}>
+            {hasVo ? "✓ VO" : "— VO"}
+          </span>
+          {error && <span className="text-pf-danger truncate">{error}</span>}
+        </div>
+      </div>
+
+      {/* Actions */}
+      <div className="flex items-center gap-1.5 shrink-0">
+        <button
+          type="button"
+          onClick={() => fileInput.current?.click()}
+          disabled={uploading}
+          className="inline-flex items-center gap-1.5 text-xs font-semibold bg-pf-accent/15 border border-pf-accent/40 text-pf-accent hover:bg-pf-accent/25 rounded-md px-2.5 py-1.5 transition-colors disabled:opacity-40"
+          title={hasImage ? "Remplacer l'image" : "Uploader une image depuis ton PC"}
+        >
+          {uploading ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <Upload size={12} />
+          )}
+          {hasImage ? "Remplacer" : "Upload"}
+        </button>
+        <Link
+          href="/"
+          target="_blank"
+          className="inline-flex items-center gap-1.5 text-xs font-semibold text-pf-dim hover:text-pf-text border border-pf-border hover:border-pf-accent rounded-md px-2.5 py-1.5 transition-colors"
+          title="Ouvrir le studio image dans un nouvel onglet. Génère, puis utilise « 📎 Rattacher au brief » pour l'attacher ici."
+        >
+          <Sparkles size={12} />
+          Générer
+        </Link>
+        {hasImage && (
+          <button
+            type="button"
+            onClick={() => onClear(briefId, hookId, avatar.id)}
+            className="inline-flex items-center justify-center w-8 h-8 text-pf-muted hover:text-pf-danger border border-pf-border hover:border-pf-danger rounded-md transition-colors"
+            title="Vider ce slot d'image (n'affecte pas la VO)"
+          >
+            <X size={13} />
+          </button>
+        )}
+        <input
+          ref={fileInput}
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            e.target.value = "";
+            if (f) void handlePick(f);
+          }}
+        />
       </div>
     </div>
   );

@@ -2861,9 +2861,19 @@ function LipsyncStatusBadge({
     );
   }
   if (status === "error") {
+    // Show the actual error message inline (truncated) instead of
+    // hiding it in a tooltip — the user can't debug "Erreur" alone.
+    // Full message stays available on hover via `title`.
+    const short = error ? error.replace(/\s+/g, " ").trim().slice(0, 90) : "";
     return (
-      <span className="text-pf-danger text-xs font-semibold" title={error}>
-        Erreur
+      <span
+        className="inline-flex items-center gap-1.5 text-pf-danger text-xs font-semibold max-w-[280px]"
+        title={error || "Erreur Kling"}
+      >
+        <span>Erreur</span>
+        {short && (
+          <span className="text-pf-muted font-normal truncate">— {short}</span>
+        )}
       </span>
     );
   }

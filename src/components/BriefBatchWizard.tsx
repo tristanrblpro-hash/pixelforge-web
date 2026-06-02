@@ -45,19 +45,22 @@ import {
 import {
   type AvatarSlot,
   type Brief,
+  MAX_AVATARS_PER_HOOK,
   loadBriefs,
   newBrief,
+  safeResizeHookAvatars,
   setAttachTarget,
   upsertBrief,
 } from "@/lib/briefs";
 import { runVoiceoverBatch, type VoBatchJob } from "@/lib/voiceoverBatch";
 import { GdocImportModal } from "@/components/GdocImportModal";
+import { UploadAndAttachButton } from "@/components/AttachToBriefButton";
 
 // ---------------------------------------------------------------------------
 // Local types
 // ---------------------------------------------------------------------------
 
-type StepId = 1 | 2 | 3 | 4 | 5 | 6;
+type StepId = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
 type DraftRow = {
   rowId: string;
@@ -574,8 +577,39 @@ export function BriefBatchWizard() {
     [briefs],
   );
 
+  // Step 2 (Avatars) handler — adjust avatar count for a single hook.
+  // Uses safeResizeHookAvatars so that any already-attached image / VO
+  // clip / lipsync video survives a count change. The user can therefore
+  // come back to Step 2 mid-batch and tweak counts without losing work.
+  const setHookAvatarCount = useCallback(
+    (briefId: string, hookId: string, target: number) => {
+      const brief = briefs.get(briefId);
+      if (!brief) return;
+      const next: Brief = {
+        ...brief,
+        hooks: brief.hooks.map((h) =>
+          h.id === hookId ? safeResizeHookAvatars(h, target) : h,
+        ),
+      };
+      // Keep brief.avatarCount in sync with the max across hooks so the
+      // single-brief wizard's avatar slider lands on a sensible value.
+      const maxCount = next.hooks.reduce(
+        (acc, h) => Math.max(acc, h.avatars.length),
+        0,
+      );
+      next.avatarCount = maxCount;
+      const saved = upsertBrief(next);
+      setBriefs((m) => {
+        const nm = new Map(m);
+        nm.set(briefId, saved);
+        return nm;
+      });
+    },
+    [briefs],
+  );
+
   // -----------------------------------------------------------------------
-  // Step 5 — Lipsync batch
+  // Step 6 — Lipsync batch
   // -----------------------------------------------------------------------
 
   type LipsyncJob = {
@@ -858,7 +892,7 @@ export function BriefBatchWizard() {
   // Step navigation
   // -----------------------------------------------------------------------
 
-  const maxStep: StepId = 6;
+  const maxStep: StepId = 7;
   const goNext = useCallback(() => {
     if (step === 1) {
       const { ok } = commitBriefs();
@@ -873,10 +907,12 @@ export function BriefBatchWizard() {
     setStep((s) => Math.max(1, s - 1) as StepId);
   }, []);
 
-  // Auto-skip steps 4+5 (Images / Lipsync) if no brief uses avatars.
+  // Auto-skip Images (5) + Lipsync (6) when no brief uses avatars. The
+  // user lands on Sync (7) instead. The Avatars step (2) is never
+  // auto-skipped — it's where the user PICKS whether to add avatars.
   useEffect(() => {
-    if ((step === 4 || step === 5) && committedBriefs.length > 0 && !hasAvatars) {
-      setStep(6);
+    if ((step === 5 || step === 6) && committedBriefs.length > 0 && !hasAvatars) {
+      setStep(7);
     }
   }, [step, committedBriefs, hasAvatars]);
 
@@ -899,14 +935,17 @@ export function BriefBatchWizard() {
           />
         )}
         {step === 2 && (
-          <Step2Scripts
+          <Step2Avatars briefs={committedBriefs} onSetAvatarCount={setHookAvatarCount} />
+        )}
+        {step === 3 && (
+          <Step3Scripts
             briefs={committedBriefs}
             onUpdateHook={updateHookField}
             onUpdateBrief={updateBriefField}
           />
         )}
-        {step === 3 && (
-          <Step3Voiceover
+        {step === 4 && (
+          <Step4Voiceover
             briefs={committedBriefs}
             voices={voices}
             voiceId={voiceId}
@@ -919,15 +958,15 @@ export function BriefBatchWizard() {
             pendingCount={voJobs.length}
           />
         )}
-        {step === 4 && (
-          <Step4Images
+        {step === 5 && (
+          <Step5Images
             briefs={committedBriefs}
             onOpenBrief={(id) => router.push(`/briefs/${id}`)}
             onUseHookVoForAvatars={useHookVoForAvatars}
           />
         )}
-        {step === 5 && (
-          <Step5Lipsync
+        {step === 6 && (
+          <Step6Lipsync
             briefs={committedBriefs}
             lipsyncState={lipsyncState}
             onRunAll={runLipsyncBatch}
@@ -937,8 +976,8 @@ export function BriefBatchWizard() {
             onOpenBrief={(id) => router.push(`/briefs/${id}`)}
           />
         )}
-        {step === 6 && (
-          <Step6Sync
+        {step === 7 && (
+          <Step7Sync
             briefs={committedBriefs}
             syncState={syncState}
             onSyncAll={syncAll}
@@ -1017,11 +1056,12 @@ function Stepper({
 }) {
   const items: { id: StepId; label: string; subtitle: string }[] = [
     { id: 1, label: "Briefs", subtitle: "Nom + créa" },
-    { id: 2, label: "Scripts", subtitle: "V1 + 2 hooks" },
-    { id: 3, label: "Voix off", subtitle: "Bulk + cut" },
-    { id: 4, label: "Images", subtitle: hasAvatars ? "Par avatar" : "Skippé" },
-    { id: 5, label: "Lipsync", subtitle: hasAvatars ? "Bulk Kling" : "Skippé" },
-    { id: 6, label: "Sync", subtitle: "Notion" },
+    { id: 2, label: "Avatars", subtitle: "Par hook (0-10)" },
+    { id: 3, label: "Scripts", subtitle: "V1 + N hooks" },
+    { id: 4, label: "Voix off", subtitle: "Bulk + cut" },
+    { id: 5, label: "Images", subtitle: hasAvatars ? "Par avatar" : "Skippé" },
+    { id: 6, label: "Lipsync", subtitle: hasAvatars ? "Bulk Kling" : "Skippé" },
+    { id: 7, label: "Sync", subtitle: "Notion" },
   ];
   return (
     <div className="bg-pf-elev border border-pf-border rounded-2xl px-2 py-2">
@@ -1029,7 +1069,7 @@ function Stepper({
         {items.map((it, i) => {
           const active = step === it.id;
           const done = step > it.id;
-          const skipped = (it.id === 4 || it.id === 5) && !hasAvatars;
+          const skipped = (it.id === 5 || it.id === 6) && !hasAvatars;
           return (
             <button
               key={it.id}
@@ -1199,16 +1239,19 @@ function Step1Briefs({
 function AvatarCountPicker({
   value,
   onChange,
+  max = MAX_AVATARS_PER_HOOK,
 }: {
   value: number;
   onChange: (n: number) => void;
+  max?: number;
 }) {
   return (
     <div className="flex items-center gap-1 bg-pf-bg border border-pf-border rounded-lg p-1">
       <button
         type="button"
         onClick={() => onChange(Math.max(0, value - 1))}
-        className="w-8 h-8 rounded-md text-pf-muted hover:text-pf-text hover:bg-pf-soft flex items-center justify-center text-lg"
+        disabled={value <= 0}
+        className="w-8 h-8 rounded-md text-pf-muted hover:text-pf-text hover:bg-pf-soft flex items-center justify-center text-lg disabled:opacity-30"
       >
         −
       </button>
@@ -1217,8 +1260,9 @@ function AvatarCountPicker({
       </span>
       <button
         type="button"
-        onClick={() => onChange(Math.min(5, value + 1))}
-        className="w-8 h-8 rounded-md text-pf-muted hover:text-pf-text hover:bg-pf-soft flex items-center justify-center text-lg"
+        onClick={() => onChange(Math.min(max, value + 1))}
+        disabled={value >= max}
+        className="w-8 h-8 rounded-md text-pf-muted hover:text-pf-text hover:bg-pf-soft flex items-center justify-center text-lg disabled:opacity-30"
       >
         +
       </button>
@@ -1227,10 +1271,134 @@ function AvatarCountPicker({
 }
 
 // ===========================================================================
-// Step 2 — Scripts + optional notes + creative ref
+// Step 2 — Avatars (per-hook avatar count picker, 0..10)
+//
+// Sits between Briefs (step 1) and Scripts (step 3). For each committed
+// brief, lists every hook (V1, H2, H3, … up to N detected from the doc)
+// with a +/− picker bound to safeResizeHookAvatars in the parent.
+// Editing here mid-batch is safe: filled slots (image/VO/lipsync
+// attached) are preserved even if the user reduces the count.
 // ===========================================================================
 
-function Step2Scripts({
+function Step2Avatars({
+  briefs,
+  onSetAvatarCount,
+}: {
+  briefs: Brief[];
+  onSetAvatarCount: (briefId: string, hookId: string, count: number) => void;
+}) {
+  const allZeroed = briefs.every((b) =>
+    b.hooks.every((h) => h.avatars.length === 0),
+  );
+  return (
+    <div className="space-y-5">
+      <Intro
+        title="Choisis combien d'avatars IA pour chaque hook"
+        body="Un avatar = une vidéo lipsync générée par Kling. Tu peux mettre 0 (pas d'avatar IA pour ce hook) jusqu'à 10. Les valeurs sont indépendantes par hook. Tu peux revenir ici à tout moment — les images / voix off déjà rattachées sont préservées si tu réduis."
+      />
+
+      {briefs.length === 0 ? (
+        <div className="bg-pf-elev border border-pf-border rounded-2xl px-5 py-10 text-center text-pf-muted">
+          Aucun brief encore. Reviens à l&apos;étape 1.
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {briefs.map((b) => (
+            <AvatarBriefCard key={b.id} brief={b} onSetAvatarCount={onSetAvatarCount} />
+          ))}
+        </div>
+      )}
+
+      {allZeroed && briefs.length > 0 && (
+        <div className="bg-pf-soft/40 border border-pf-border rounded-xl px-4 py-3 text-sm text-pf-dim">
+          Aucun avatar configuré → les étapes Images + Lipsync seront
+          automatiquement skippées. Tu peux passer directement à Scripts.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AvatarBriefCard({
+  brief,
+  onSetAvatarCount,
+}: {
+  brief: Brief;
+  onSetAvatarCount: (briefId: string, hookId: string, count: number) => void;
+}) {
+  const total = brief.hooks.reduce((acc, h) => acc + h.avatars.length, 0);
+  const filled = brief.hooks.reduce(
+    (acc, h) =>
+      acc +
+      h.avatars.filter((a) => a.imageUrl || a.voClipUrl || a.lipsyncVideoUrl).length,
+    0,
+  );
+  return (
+    <div className="bg-pf-elev border border-pf-border rounded-2xl overflow-hidden">
+      <div className="flex items-center justify-between px-5 py-3 border-b border-pf-border bg-pf-soft/40 gap-3">
+        <div className="min-w-0">
+          <div className="text-base font-bold truncate">{brief.adsetName}</div>
+          <div className="text-sm text-pf-muted font-mono">
+            {brief.hooks.length} hook{brief.hooks.length > 1 ? "s" : ""} ·{" "}
+            {total} avatar{total > 1 ? "s" : ""}
+            {filled > 0 && (
+              <span className="text-pf-ok"> · {filled} avec contenu</span>
+            )}
+          </div>
+        </div>
+      </div>
+      <div className="divide-y divide-pf-border">
+        {brief.hooks.map((h) => {
+          const filledHere = h.avatars.filter(
+            (a) => a.imageUrl || a.voClipUrl || a.lipsyncVideoUrl,
+          ).length;
+          const label = h.index === 1 ? "V1" : `Hook ${h.index}`;
+          return (
+            <div
+              key={h.id}
+              className="flex items-center justify-between px-5 py-3 gap-4"
+            >
+              <div className="flex items-center gap-3 min-w-0 flex-1">
+                <span className="inline-flex items-center justify-center text-sm font-bold font-mono text-pf-text bg-pf-soft border border-pf-border rounded-md px-2.5 py-1 min-w-[56px]">
+                  {label}
+                </span>
+                <div className="min-w-0">
+                  <div className="text-sm">
+                    {h.avatars.length === 0 ? (
+                      <span className="text-pf-muted">Aucun avatar IA</span>
+                    ) : (
+                      <span className="text-pf-text">
+                        {h.avatars.length} avatar
+                        {h.avatars.length > 1 ? "s" : ""}
+                      </span>
+                    )}
+                  </div>
+                  {filledHere > 0 && (
+                    <div className="text-[11px] text-pf-ok">
+                      {filledHere} avec contenu rattaché (image / VO / lipsync) —
+                      seront préservés
+                    </div>
+                  )}
+                </div>
+              </div>
+              <AvatarCountPicker
+                value={h.avatars.length}
+                onChange={(n) => onSetAvatarCount(brief.id, h.id, n)}
+                max={MAX_AVATARS_PER_HOOK}
+              />
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ===========================================================================
+// Step 3 — Scripts + optional notes + creative ref
+// ===========================================================================
+
+function Step3Scripts({
   briefs,
   onUpdateHook,
   onUpdateBrief,
@@ -1396,7 +1564,7 @@ function Step2Scripts({
 // Step 3 — Voice-over — CARD PER BRIEF (V1 / H2 / H3 inside)
 // ===========================================================================
 
-function Step3Voiceover({
+function Step4Voiceover({
   briefs,
   voices,
   voiceId,
@@ -1611,7 +1779,7 @@ function Step3Voiceover({
 // Step 4 — Images (per-brief progress + open in wizard)
 // ===========================================================================
 
-function Step4Images({
+function Step5Images({
   briefs,
   onOpenBrief,
   onUseHookVoForAvatars,
@@ -1648,6 +1816,10 @@ function Step4Images({
       />
 
       <div className="flex flex-wrap items-center gap-2">
+        <UploadAndAttachButton
+          label="Uploader une image depuis ton PC"
+          className="inline-flex items-center gap-2 bg-pf-accent/15 border border-pf-accent/40 text-pf-accent hover:bg-pf-accent/25 rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors disabled:opacity-40"
+        />
         <Link
           href="/prompts"
           target="_blank"
@@ -1765,7 +1937,7 @@ function ChecklineRow({ label, done, total }: { label: string; done: number; tot
 // Step 5 — Lipsync (batch with Kling polling)
 // ===========================================================================
 
-function Step5Lipsync({
+function Step6Lipsync({
   briefs,
   lipsyncState,
   onRunAll,
@@ -1971,7 +2143,7 @@ function Step5Lipsync({
 // Step 6 — Sync (was 5)
 // ===========================================================================
 
-function Step6Sync({
+function Step7Sync({
   briefs,
   syncState,
   onSyncAll,

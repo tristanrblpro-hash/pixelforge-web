@@ -81,6 +81,10 @@ export type Brief = {
 const STORAGE_KEY = "pf:briefs:v1";
 const ATTACH_KEY = "pf:briefAttachTo";
 
+/** Maximum number of AI avatars per hook. Bumped from 5 to 10 once users
+ *  started running variants on heavy talking-head campaigns. */
+export const MAX_AVATARS_PER_HOOK = 10;
+
 // ---------------------------------------------------------------------------
 // IDs + factories
 // ---------------------------------------------------------------------------
@@ -135,7 +139,7 @@ export function newBrief(options?: {
   hookCount?: number;
 }): Brief {
   const ts = Date.now();
-  const avatarCount = Math.max(0, Math.min(5, options?.avatarCount ?? 0));
+  const avatarCount = Math.max(0, Math.min(MAX_AVATARS_PER_HOOK, options?.avatarCount ?? 0));
   const hookCount = Math.max(1, Math.min(50, options?.hookCount ?? 3));
   const template: BriefTemplate = avatarCount > 0 ? "avatar" : "simple";
   const adsetName =
@@ -300,36 +304,43 @@ export function deleteBrief(id: string): void {
 // Avatar-count synchronisation
 // ---------------------------------------------------------------------------
 
+// Safe resize for a single hook's avatar list — never destroys a slot
+// that holds an image / VO clip / lipsync. Used by the batch wizard's
+// per-hook avatar picker so editing settings on an in-progress batch
+// preserves any work already attached to a slot.
+export function safeResizeHookAvatars(hook: HookBrief, target: number): HookBrief {
+  const clamped = Math.max(0, Math.min(MAX_AVATARS_PER_HOOK, target));
+  const cur = hook.avatars;
+  if (cur.length === clamped) return hook;
+  if (cur.length < clamped) {
+    const extras = Array.from({ length: clamped - cur.length }, (_, i) =>
+      newAvatar(`Avatar IA ${cur.length + i + 1}`),
+    );
+    return { ...hook, avatars: [...cur, ...extras] };
+  }
+  // Shrink: keep all filled slots, drop empties first. Effective floor
+  // is the filled count — we never delete data.
+  const filled: AvatarSlot[] = [];
+  const empties: AvatarSlot[] = [];
+  for (const a of cur) {
+    const isEmpty = !a.voClipUrl && !a.imageUrl && !a.lipsyncVideoUrl;
+    if (isEmpty) empties.push(a);
+    else filled.push(a);
+  }
+  const effectiveTarget = Math.max(clamped, filled.length);
+  const keep = [...filled, ...empties].slice(0, effectiveTarget);
+  return { ...hook, avatars: keep };
+}
+
 // Resize every hook's avatar list to match the desired count. Existing
 // slots are preserved (we never destroy a slot that has data). Adding
 // slots fills with fresh defaults.
 export function syncAvatarCount(brief: Brief, newCount: number): Brief {
-  const target = Math.max(0, Math.min(5, newCount));
+  const target = Math.max(0, Math.min(MAX_AVATARS_PER_HOOK, newCount));
   return {
     ...brief,
     avatarCount: target,
-    hooks: brief.hooks.map((h) => {
-      const cur = h.avatars;
-      if (cur.length === target) return h;
-      if (cur.length < target) {
-        const extras = Array.from({ length: target - cur.length }, (_, i) =>
-          newAvatar(`Avatar IA ${cur.length + i + 1}`),
-        );
-        return { ...h, avatars: [...cur, ...extras] };
-      }
-      // Shrink: only drop slots that are empty (no clip + no image + no
-      // lipsync). Preserve filled slots even past target.
-      const trimmed: AvatarSlot[] = [];
-      const empties: AvatarSlot[] = [];
-      for (const a of cur) {
-        const empty = !a.voClipUrl && !a.imageUrl && !a.lipsyncVideoUrl;
-        if (empty) empties.push(a);
-        else trimmed.push(a);
-      }
-      // Keep all filled + as many empty as needed to hit target.
-      const keep = [...trimmed, ...empties].slice(0, Math.max(trimmed.length, target));
-      return { ...h, avatars: keep };
-    }),
+    hooks: brief.hooks.map((h) => safeResizeHookAvatars(h, target)),
   };
 }
 

@@ -18,17 +18,19 @@
 // component is pure UI. Renders nothing if there are no briefs yet
 // (instead it shows a "create a brief first" hint inline).
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Check,
   FileText,
   ImageIcon,
+  ImagePlus,
   Loader2,
   Mic,
   Paperclip,
   Plus,
   Sparkles,
+  Upload,
   Users,
   Video,
   X,
@@ -912,3 +914,126 @@ function EmptyState({ onClose }: { onClose: () => void }) {
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// UploadAndAttachButton — drop a file from your PC into a brief in one go.
+//
+// Click → native file picker (image/video/audio) → POST /api/upload to
+// Supabase Storage → opens the same AttachDialog the gallery uses, but
+// pre-loaded with the freshly uploaded asset's URL. The user picks
+// brief / hook / slot exactly like for a generated asset.
+//
+// This is the fast path for assets you already have on your machine
+// (a screenshot, a stock photo, a phone recording, etc.) — no need to
+// open /prompts and re-generate it just to attach.
+// ---------------------------------------------------------------------------
+
+type UploadButtonProps = {
+  /** Filter the native file picker. Defaults to all image types. */
+  accept?: string;
+  /** Override the button label. */
+  label?: string;
+  className?: string;
+  /** Pre-determine what kind of asset to expect — defaults derived from
+   *  the picked file's MIME type. */
+  kindHint?: AttachableAsset["kind"];
+  /** Optional callback after a successful attach. */
+  onAttached?: (target: AttachTarget) => void;
+};
+
+export function UploadAndAttachButton({
+  accept = "image/png,image/jpeg,image/jpg,image/webp",
+  label = "Uploader une image",
+  className,
+  kindHint,
+  onAttached,
+}: UploadButtonProps) {
+  const fileInput = useRef<HTMLInputElement | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [pendingAsset, setPendingAsset] = useState<AttachableAsset | null>(null);
+
+  const handlePick = useCallback(
+    async (file: File) => {
+      setError(null);
+      setUploading(true);
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const r = await fetch("/api/upload", { method: "POST", body: form });
+        const data = (await r.json()) as { url?: string; error?: string };
+        if (!r.ok || !data.url) {
+          throw new Error(data.error || `HTTP ${r.status}`);
+        }
+        const kind: AttachableAsset["kind"] =
+          kindHint ??
+          (file.type.startsWith("video/")
+            ? "video"
+            : file.type.startsWith("audio/")
+              ? "audio"
+              : "image");
+        setPendingAsset({
+          kind,
+          url: data.url,
+          label: file.name,
+        });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setUploading(false);
+      }
+    },
+    [kindHint],
+  );
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => fileInput.current?.click()}
+        disabled={uploading}
+        className={
+          className ??
+          "inline-flex items-center gap-2 bg-pf-soft border border-pf-border hover:border-pf-accent rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors disabled:opacity-40"
+        }
+        title="Choisir une image depuis ton PC et la rattacher à un brief"
+      >
+        {uploading ? (
+          <Loader2 size={15} className="animate-spin" />
+        ) : (
+          <Upload size={15} />
+        )}
+        {uploading ? "Upload…" : label}
+      </button>
+      <input
+        ref={fileInput}
+        type="file"
+        accept={accept}
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          // Reset the input so re-picking the same file fires onChange.
+          e.target.value = "";
+          if (f) void handlePick(f);
+        }}
+      />
+      {error && (
+        <span className="text-xs text-pf-danger ml-2">{error}</span>
+      )}
+      {pendingAsset && (
+        <AttachDialog
+          asset={pendingAsset}
+          onClose={() => setPendingAsset(null)}
+          onAttached={(t) => {
+            onAttached?.(t);
+            setPendingAsset(null);
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+// Tiny re-export so the bare `ImagePlus` icon is reachable from callers
+// who want a smaller variant of the upload button.
+export { ImagePlus };

@@ -27,12 +27,14 @@ const DISMISSED_KEY = "pf:batchWizard:bannerDismissed";
 type StepLabel = { id: number; label: string };
 const STEP_LABELS: StepLabel[] = [
   { id: 1, label: "Briefs" },
-  { id: 2, label: "Scripts" },
-  { id: 3, label: "Voix off" },
-  { id: 4, label: "Images" },
-  { id: 5, label: "Lipsync" },
-  { id: 6, label: "Sync" },
+  { id: 2, label: "Avatars" },
+  { id: 3, label: "Scripts" },
+  { id: 4, label: "Voix off" },
+  { id: 5, label: "Images" },
+  { id: 6, label: "Lipsync" },
+  { id: 7, label: "Sync" },
 ];
+const TOTAL_STEPS = STEP_LABELS.length;
 
 type PersistedBatchState = {
   step: number;
@@ -96,7 +98,7 @@ export function BatchResumeBanner() {
   // info would lag a frame after nav).
   void pathname;
 
-  const step = Math.max(1, Math.min(6, state.step));
+  const step = Math.max(1, Math.min(TOTAL_STEPS, state.step));
   const stepLabel = STEP_LABELS.find((s) => s.id === step)?.label ?? "";
   const briefCount = state.rows!.filter((r) => r.briefId).length;
 
@@ -124,7 +126,7 @@ export function BatchResumeBanner() {
           <span className="font-semibold text-pf-text">Batch hebdo en cours</span>
           <span className="text-pf-muted">·</span>
           <span className="text-pf-dim font-mono">
-            étape {step}/6 · {stepLabel}
+            étape {step}/{TOTAL_STEPS} · {stepLabel}
           </span>
           <span className="text-pf-muted">·</span>
           <span className="text-pf-dim font-mono">

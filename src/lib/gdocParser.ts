@@ -414,7 +414,10 @@ function parseAvatarLine(raw: string): number[] | null {
 
 function clampAvatar(n: number): number | null {
   if (Number.isNaN(n) || n < 0) return null;
-  return Math.min(5, n);
+  // Capped at 10 (the brief data model's MAX_AVATARS_PER_HOOK). Higher
+  // values from the doc are silently clamped — the user can bump in the
+  // wizard's Avatars step if they need to.
+  return Math.min(10, n);
 }
 
 // ---------------------------------------------------------------------------

@@ -153,9 +153,10 @@ function AvatarPicker({
           masquée.
         </p>
 
-        {/* Visual scale 0..5 */}
+        {/* Visual scale 0..10 — bumped from 5 once users started running
+            heavy variants. Two rows of 6 for compactness. */}
         <div className="grid grid-cols-6 gap-2 mb-5">
-          {[0, 1, 2, 3, 4, 5].map((n) => {
+          {Array.from({ length: 11 }, (_, n) => n).map((n) => {
             const active = n === avatarCount;
             return (
               <button

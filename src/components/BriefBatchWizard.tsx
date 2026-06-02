@@ -94,6 +94,10 @@ type LsCellState = {
   status: LsCellStatus;
   error?: string;
   url?: string;
+  // KIE batch id, set when "running" so we can resume polling after a
+  // page reload / nav (otherwise the in-memory setInterval dies and the
+  // row stays stuck in "En cours" forever even though Kling is done).
+  batchId?: string;
 };
 
 type SyncCellState = {
@@ -210,7 +214,20 @@ export function BriefBatchWizard() {
       setStep(persisted.step);
       setRows(persisted.rows.length > 0 ? persisted.rows : [makeRow()]);
       setVoState(new Map(persisted.voState));
-      setLipsyncState(new Map(persisted.lipsyncState));
+      // Sanitize lipsyncState: any "running" entry without a batchId
+      // came from a previous session whose in-memory poller died on
+      // unload — there's no way to recover it, so demote to "idle" so
+      // the user can retry. Running entries WITH a batchId are kept
+      // (the resume effect below will spin up fresh pollers for them).
+      const sanitized = new Map<string, LsCellState>();
+      for (const [id, s] of persisted.lipsyncState) {
+        if (s.status === "running" && !s.batchId) {
+          sanitized.set(id, { status: "idle" });
+        } else {
+          sanitized.set(id, s);
+        }
+      }
+      setLipsyncState(sanitized);
       // Rehydrate briefs map from localStorage by id.
       const all = loadBriefs();
       const m = new Map<string, Brief>();
@@ -223,6 +240,26 @@ export function BriefBatchWizard() {
       setBriefs(m);
     }
   }, []);
+
+  // ----- Resume polling for jobs that were "running" with a known
+  // batchId when the page was last unloaded. Runs once briefs are
+  // hydrated so we have the (briefId, hookId, avatarId) to write back
+  // into when the job completes.
+  const resumedPollers = useRef(false);
+  useEffect(() => {
+    if (!hydrated.current || resumedPollers.current) return;
+    if (briefs.size === 0) return; // wait for briefs hydration
+    resumedPollers.current = true;
+    for (const [id, s] of lipsyncState) {
+      if (s.status !== "running" || !s.batchId) continue;
+      const [briefId, hookId, avatarId] = id.split(":");
+      if (!briefId || !hookId || !avatarId) continue;
+      void startLsPolling(id, s.batchId, briefId, hookId, avatarId);
+    }
+    // Intentionally not in deps: this should fire exactly once after
+    // first briefs hydration, not every time lipsyncState changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [briefs.size]);
 
   // ----- Persist on changes (debounced via microtask) -----
   useEffect(() => {
@@ -915,8 +952,15 @@ export function BriefBatchWizard() {
         });
         const data = await r.json();
         if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+        // Stash the batch_id alongside "running" so a page reload can
+        // resume polling instead of leaving the row stuck forever.
+        setLipsyncState((s) => {
+          const nm = new Map(s);
+          nm.set(job.id, { status: "running", batchId: data.batch_id });
+          return nm;
+        });
         // Block until polling reports a terminal state — required so
-        // the wave loop in runLipsyncBatch can advance correctly.
+        // the sequential queue can advance correctly.
         await startLsPolling(
           job.id,
           data.batch_id,
@@ -975,6 +1019,24 @@ export function BriefBatchWizard() {
       });
     },
     [briefs, runOneLipsync],
+  );
+
+  // Manual "unstick" — clear a row that's reported "running" but is
+  // actually orphaned (in-memory poller died and Kling didn't write
+  // back, or the user wants to retry from scratch). Kills the local
+  // setInterval if any, then drops the entry from lipsyncState so the
+  // row falls back to "Prête à générer".
+  const resetOneLipsync = useCallback(
+    (briefId: string, hookId: string, avatarId: string) => {
+      const id = `${briefId}:${hookId}:${avatarId}`;
+      stopLsPolling(id);
+      setLipsyncState((s) => {
+        const nm = new Map(s);
+        nm.delete(id);
+        return nm;
+      });
+    },
+    [stopLsPolling],
   );
 
   // -----------------------------------------------------------------------
@@ -1138,6 +1200,7 @@ export function BriefBatchWizard() {
             onRunAll={runLipsyncBatch}
             onCancel={cancelLipsyncBatch}
             onTriggerOne={triggerOneLipsync}
+            onResetOne={resetOneLipsync}
             pendingCount={lipsyncJobs.length}
             anyRunning={Array.from(lipsyncState.values()).some((s) => s.status === "running")}
             onOpenBrief={(id) => router.push(`/briefs/${id}`)}
@@ -2397,6 +2460,7 @@ function Step6Lipsync({
   onRunAll,
   onCancel,
   onTriggerOne,
+  onResetOne,
   pendingCount,
   anyRunning,
   onOpenBrief,
@@ -2406,6 +2470,7 @@ function Step6Lipsync({
   onRunAll: () => void;
   onCancel: () => void;
   onTriggerOne: (briefId: string, hookId: string, avatarId: string) => Promise<void>;
+  onResetOne: (briefId: string, hookId: string, avatarId: string) => void;
   pendingCount: number;
   anyRunning: boolean;
   onOpenBrief: (id: string) => void;
@@ -2499,6 +2564,7 @@ function Step6Lipsync({
             brief={b}
             lipsyncState={lipsyncState}
             onTriggerOne={onTriggerOne}
+            onResetOne={onResetOne}
             onOpenBrief={onOpenBrief}
           />
         ))}
@@ -2514,11 +2580,13 @@ function BriefLipsyncList({
   brief,
   lipsyncState,
   onTriggerOne,
+  onResetOne,
   onOpenBrief,
 }: {
   brief: Brief;
   lipsyncState: Map<string, LsCellState>;
   onTriggerOne: (briefId: string, hookId: string, avatarId: string) => Promise<void>;
+  onResetOne: (briefId: string, hookId: string, avatarId: string) => void;
   onOpenBrief: (id: string) => void;
 }) {
   const slots = brief.hooks.flatMap((h) => h.avatars);
@@ -2570,6 +2638,7 @@ function BriefLipsyncList({
             hook={h}
             lipsyncState={lipsyncState}
             onTriggerOne={onTriggerOne}
+            onResetOne={onResetOne}
           />
         ))}
       </div>
@@ -2582,11 +2651,13 @@ function HookLipsyncGroup({
   hook,
   lipsyncState,
   onTriggerOne,
+  onResetOne,
 }: {
   briefId: string;
   hook: HookBrief;
   lipsyncState: Map<string, LsCellState>;
   onTriggerOne: (briefId: string, hookId: string, avatarId: string) => Promise<void>;
+  onResetOne: (briefId: string, hookId: string, avatarId: string) => void;
 }) {
   const label = hook.index === 1 ? "V1 — Original" : `Hook ${hook.index}`;
   const doneHere = hook.avatars.filter(
@@ -2613,6 +2684,7 @@ function HookLipsyncGroup({
             avatarIdx={idx}
             state={lipsyncState.get(`${briefId}:${hook.id}:${av.id}`)}
             onTriggerOne={onTriggerOne}
+            onResetOne={onResetOne}
           />
         ))}
       </div>
@@ -2627,6 +2699,7 @@ function LipsyncSlotRow({
   avatarIdx,
   state,
   onTriggerOne,
+  onResetOne,
 }: {
   briefId: string;
   hookId: string;
@@ -2634,6 +2707,7 @@ function LipsyncSlotRow({
   avatarIdx: number;
   state: LsCellState | undefined;
   onTriggerOne: (briefId: string, hookId: string, avatarId: string) => Promise<void>;
+  onResetOne: (briefId: string, hookId: string, avatarId: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const hasImage = !!avatar.imageUrl;
@@ -2704,6 +2778,20 @@ function LipsyncSlotRow({
             Voir vidéo
           </a>
         )}
+        {/* Escape hatch when a row is stuck in "running" — typically
+            because the page was reloaded and the in-memory poller died
+            without a recoverable batchId. Clears the cell state so the
+            user can re-trigger from scratch. */}
+        {status === "running" && !done && (
+          <button
+            type="button"
+            onClick={() => onResetOne(briefId, hookId, avatar.id)}
+            className="inline-flex items-center gap-1.5 text-xs font-semibold text-pf-muted hover:text-pf-danger border border-pf-border hover:border-pf-danger rounded-md px-2.5 py-1.5 transition-colors"
+            title="Débloquer cette row (si elle reste « En cours » sans rien faire)"
+          >
+            Réinitialiser
+          </button>
+        )}
         <button
           type="button"
           onClick={handleGenerate}
@@ -2719,7 +2807,7 @@ function LipsyncSlotRow({
               : done
                 ? "Déjà généré — utilise « Voir vidéo »"
                 : status === "running"
-                  ? "En cours — attends la fin"
+                  ? "En cours — attends la fin ou clique Réinitialiser"
                   : "Lancer Kling pour ce lipsync"
           }
         >

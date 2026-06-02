@@ -689,6 +689,77 @@ export function BriefBatchWizard() {
     [],
   );
 
+  // Same pattern as the image handlers above, for the per-avatar voice
+  // clip (avatar.voClipUrl). Audio MIME types are accepted by /api/upload
+  // already, so the same endpoint works for both flows.
+  const uploadVoToAvatar = useCallback(
+    async (briefId: string, hookId: string, avatarId: string, file: File) => {
+      const form = new FormData();
+      form.append("file", file);
+      const r = await fetch("/api/upload", { method: "POST", body: form });
+      const data = (await r.json()) as { url?: string; error?: string };
+      if (!r.ok || !data.url) {
+        throw new Error(data.error || `HTTP ${r.status}`);
+      }
+      const updated = applyAttach(
+        { kind: "avatarClip", briefId, hookId, avatarId },
+        { url: data.url, text: file.name },
+      );
+      if (updated) {
+        setBriefs((m) => {
+          const nm = new Map(m);
+          nm.set(briefId, updated);
+          return nm;
+        });
+      }
+    },
+    [],
+  );
+
+  const clearAvatarVo = useCallback(
+    (briefId: string, hookId: string, avatarId: string) => {
+      const updated = clearAttach({
+        kind: "avatarClip",
+        briefId,
+        hookId,
+        avatarId,
+      });
+      if (updated) {
+        setBriefs((m) => {
+          const nm = new Map(m);
+          nm.set(briefId, updated);
+          return nm;
+        });
+      }
+    },
+    [],
+  );
+
+  // Per-avatar variant of useHookVoForAvatars: copies just THIS avatar's
+  // voClipUrl from its hook.cutVoUrl. No-op if the hook has no VO. Does
+  // not check whether the avatar already has a clip — the button is
+  // labeled "VO du hook" so the user explicitly opts in to overwrite.
+  const useHookVoForOneAvatar = useCallback(
+    (briefId: string, hookId: string, avatarId: string) => {
+      const brief = briefs.get(briefId);
+      if (!brief) return;
+      const hook = brief.hooks.find((h) => h.id === hookId);
+      if (!hook?.cutVoUrl) return;
+      const updated = applyAttach(
+        { kind: "avatarClip", briefId, hookId, avatarId },
+        { url: hook.cutVoUrl, text: hook.hookScript || undefined },
+      );
+      if (updated) {
+        setBriefs((m) => {
+          const nm = new Map(m);
+          nm.set(briefId, updated);
+          return nm;
+        });
+      }
+    },
+    [briefs],
+  );
+
   // -----------------------------------------------------------------------
   // Step 6 — Lipsync batch
   // -----------------------------------------------------------------------
@@ -1046,6 +1117,9 @@ export function BriefBatchWizard() {
             onUseHookVoForAvatars={useHookVoForAvatars}
             onUploadImageToAvatar={uploadImageToAvatar}
             onClearAvatarImage={clearAvatarImage}
+            onUploadVoToAvatar={uploadVoToAvatar}
+            onClearAvatarVo={clearAvatarVo}
+            onUseHookVoForOneAvatar={useHookVoForOneAvatar}
           />
         )}
         {step === 6 && (
@@ -1862,19 +1936,24 @@ function Step4Voiceover({
 // Step 4 — Images (per-brief progress + open in wizard)
 // ===========================================================================
 
+type AvatarRowHandlers = {
+  onUploadImageToAvatar: (briefId: string, hookId: string, avatarId: string, file: File) => Promise<void>;
+  onClearAvatarImage: (briefId: string, hookId: string, avatarId: string) => void;
+  onUploadVoToAvatar: (briefId: string, hookId: string, avatarId: string, file: File) => Promise<void>;
+  onClearAvatarVo: (briefId: string, hookId: string, avatarId: string) => void;
+  onUseHookVoForOneAvatar: (briefId: string, hookId: string, avatarId: string) => void;
+};
+
 function Step5Images({
   briefs,
   onOpenBrief,
   onUseHookVoForAvatars,
-  onUploadImageToAvatar,
-  onClearAvatarImage,
+  ...handlers
 }: {
   briefs: Brief[];
   onOpenBrief: (id: string) => void;
   onUseHookVoForAvatars: (briefId: string) => void;
-  onUploadImageToAvatar: (briefId: string, hookId: string, avatarId: string, file: File) => Promise<void>;
-  onClearAvatarImage: (briefId: string, hookId: string, avatarId: string) => void;
-}) {
+} & AvatarRowHandlers) {
   const withAvatars = briefs.filter((b) =>
     b.hooks.some((h) => h.avatars.length > 0),
   );
@@ -1931,8 +2010,7 @@ function Step5Images({
             brief={b}
             onOpenBrief={onOpenBrief}
             onUseHookVoForAvatars={onUseHookVoForAvatars}
-            onUploadImageToAvatar={onUploadImageToAvatar}
-            onClearAvatarImage={onClearAvatarImage}
+            {...handlers}
           />
         ))}
       </div>
@@ -1942,20 +2020,18 @@ function Step5Images({
 
 // One brief = one expandable list of hooks → avatars. Header shows the
 // brief name + per-asset progress; body lists every (hook, avatar) row
-// with inline Upload + Generate + (when filled) Clear actions.
+// with inline Upload + Generate + (when filled) Clear actions, on TWO
+// sub-rows: one for the avatar's image, one for its voice clip.
 function BriefImageList({
   brief,
   onOpenBrief,
   onUseHookVoForAvatars,
-  onUploadImageToAvatar,
-  onClearAvatarImage,
+  ...handlers
 }: {
   brief: Brief;
   onOpenBrief: (id: string) => void;
   onUseHookVoForAvatars: (briefId: string) => void;
-  onUploadImageToAvatar: (briefId: string, hookId: string, avatarId: string, file: File) => Promise<void>;
-  onClearAvatarImage: (briefId: string, hookId: string, avatarId: string) => void;
-}) {
+} & AvatarRowHandlers) {
   const totalSlots = brief.hooks.reduce((acc, h) => acc + h.avatars.length, 0);
   const imagesAssigned = brief.hooks.reduce(
     (acc, h) => acc + h.avatars.filter((a) => a.imageUrl).length,
@@ -2034,8 +2110,7 @@ function BriefImageList({
             key={h.id}
             briefId={brief.id}
             hook={h}
-            onUploadImageToAvatar={onUploadImageToAvatar}
-            onClearAvatarImage={onClearAvatarImage}
+            {...handlers}
           />
         ))}
       </div>
@@ -2046,16 +2121,14 @@ function BriefImageList({
 function HookAvatarGroup({
   briefId,
   hook,
-  onUploadImageToAvatar,
-  onClearAvatarImage,
+  ...handlers
 }: {
   briefId: string;
   hook: HookBrief;
-  onUploadImageToAvatar: (briefId: string, hookId: string, avatarId: string, file: File) => Promise<void>;
-  onClearAvatarImage: (briefId: string, hookId: string, avatarId: string) => void;
-}) {
+} & AvatarRowHandlers) {
   const label = hook.index === 1 ? "V1 — Original" : `Hook ${hook.index}`;
   const imagesFilled = hook.avatars.filter((a) => a.imageUrl).length;
+  const voFilled = hook.avatars.filter((a) => a.voClipUrl).length;
   return (
     <div>
       {/* Hook sub-header */}
@@ -2065,20 +2138,20 @@ function HookAvatarGroup({
         </span>
         <div className="text-sm font-semibold text-pf-text">{label}</div>
         <span className="text-xs text-pf-muted font-mono ml-auto">
-          {imagesFilled}/{hook.avatars.length} images
+          {imagesFilled}/{hook.avatars.length} img · {voFilled}/{hook.avatars.length} VO
         </span>
       </div>
       {/* Avatar rows */}
       <div className="divide-y divide-pf-border/40">
         {hook.avatars.map((av, idx) => (
-          <AvatarImageRow
+          <AvatarSlotRow
             key={av.id}
             briefId={briefId}
             hookId={hook.id}
+            hookHasVo={!!hook.cutVoUrl}
             avatar={av}
             avatarIdx={idx}
-            onUpload={onUploadImageToAvatar}
-            onClear={onClearAvatarImage}
+            {...handlers}
           />
         ))}
       </div>
@@ -2086,20 +2159,128 @@ function HookAvatarGroup({
   );
 }
 
-function AvatarImageRow({
+function AvatarSlotRow({
   briefId,
   hookId,
+  hookHasVo,
   avatar,
   avatarIdx,
-  onUpload,
-  onClear,
+  onUploadImageToAvatar,
+  onClearAvatarImage,
+  onUploadVoToAvatar,
+  onClearAvatarVo,
+  onUseHookVoForOneAvatar,
 }: {
   briefId: string;
   hookId: string;
+  hookHasVo: boolean;
   avatar: AvatarSlot;
   avatarIdx: number;
-  onUpload: (briefId: string, hookId: string, avatarId: string, file: File) => Promise<void>;
-  onClear: (briefId: string, hookId: string, avatarId: string) => void;
+} & AvatarRowHandlers) {
+  const hasImage = !!avatar.imageUrl;
+  const hasVo = !!avatar.voClipUrl;
+
+  return (
+    <div className="px-5 py-3 space-y-2.5">
+      {/* Header row — thumbnail + label + global status */}
+      <div className="flex items-center gap-3">
+        <div className="w-14 h-14 rounded-lg border border-pf-border bg-pf-bg shrink-0 flex items-center justify-center overflow-hidden">
+          {hasImage ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={avatar.imageUrl!}
+              alt={avatar.label}
+              className="w-full h-full object-cover"
+            />
+          ) : (
+            <ImageIcon size={20} className="text-pf-muted" />
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-semibold text-pf-text truncate">
+            Avatar {avatarIdx + 1}
+            {avatar.label && avatar.label !== `Avatar IA ${avatarIdx + 1}` && (
+              <span className="text-pf-muted ml-1.5 font-normal">— {avatar.label}</span>
+            )}
+          </div>
+          <div className="flex items-center gap-3 mt-0.5 text-[11px] font-mono">
+            <span className={hasImage ? "text-pf-ok" : "text-pf-muted"}>
+              {hasImage ? "✓ Image" : "— Image"}
+            </span>
+            <span className={hasVo ? "text-pf-ok" : "text-pf-muted"}>
+              {hasVo ? "✓ VO" : "— VO"}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Image actions row */}
+      <SlotActionRow
+        label="Image"
+        accept="image/png,image/jpeg,image/webp"
+        currentUrl={avatar.imageUrl}
+        isAudio={false}
+        generateHref="/"
+        generateTitle="Ouvrir le studio image. Génère, puis utilise « 📎 Rattacher au brief » pour l'attacher ici."
+        onUpload={async (file) => onUploadImageToAvatar(briefId, hookId, avatar.id, file)}
+        onClear={() => onClearAvatarImage(briefId, hookId, avatar.id)}
+      />
+
+      {/* VO actions row */}
+      <SlotActionRow
+        label="Voix off"
+        accept="audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/aac,audio/mp4,audio/ogg,audio/webm"
+        currentUrl={avatar.voClipUrl}
+        isAudio={true}
+        generateHref="/voiceover"
+        generateTitle="Ouvrir le studio voix off. Génère, puis utilise « 📎 Rattacher au brief » pour l'attacher ici."
+        onUpload={async (file) => onUploadVoToAvatar(briefId, hookId, avatar.id, file)}
+        onClear={() => onClearAvatarVo(briefId, hookId, avatar.id)}
+        leftAction={
+          hookHasVo ? (
+            <button
+              type="button"
+              onClick={() => onUseHookVoForOneAvatar(briefId, hookId, avatar.id)}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold bg-pf-soft border border-pf-border hover:border-pf-accent text-pf-text rounded-md px-2.5 py-1.5 transition-colors"
+              title={
+                hasVo
+                  ? "Remplacer la VO actuelle par celle du hook"
+                  : "Copier la voix off du hook (cutVoUrl) dans ce slot"
+              }
+            >
+              <Mic size={12} />
+              VO du hook
+            </button>
+          ) : null
+        }
+      />
+    </div>
+  );
+}
+
+// One uniform action row used for both image and VO. Handles the file
+// input + Upload/Remplacer label + Générer link + optional Vider button
+// + an optional extra leftAction slot (used by VO for "VO du hook").
+function SlotActionRow({
+  label,
+  accept,
+  currentUrl,
+  isAudio,
+  generateHref,
+  generateTitle,
+  leftAction,
+  onUpload,
+  onClear,
+}: {
+  label: string;
+  accept: string;
+  currentUrl: string | undefined;
+  isAudio: boolean;
+  generateHref: string;
+  generateTitle: string;
+  leftAction?: React.ReactNode;
+  onUpload: (file: File) => Promise<void>;
+  onClear: () => void;
 }) {
   const fileInput = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -2110,101 +2291,75 @@ function AvatarImageRow({
       setUploading(true);
       setError(null);
       try {
-        await onUpload(briefId, hookId, avatar.id, file);
+        await onUpload(file);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
         setUploading(false);
       }
     },
-    [briefId, hookId, avatar.id, onUpload],
+    [onUpload],
   );
 
-  const hasImage = !!avatar.imageUrl;
-  const hasVo = !!avatar.voClipUrl;
+  const filled = !!currentUrl;
 
   return (
-    <div className="flex items-center gap-3 px-5 py-3">
-      {/* Thumbnail or empty placeholder */}
-      <div className="w-14 h-14 rounded-lg border border-pf-border bg-pf-bg shrink-0 flex items-center justify-center overflow-hidden">
-        {hasImage ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={avatar.imageUrl!}
-            alt={avatar.label}
-            className="w-full h-full object-cover"
-          />
-        ) : (
-          <ImageIcon size={20} className="text-pf-muted" />
-        )}
-      </div>
-
-      {/* Label + status */}
-      <div className="flex-1 min-w-0">
-        <div className="text-sm font-semibold text-pf-text truncate">
-          Avatar {avatarIdx + 1}
-          {avatar.label && avatar.label !== `Avatar IA ${avatarIdx + 1}` && (
-            <span className="text-pf-muted ml-1.5 font-normal">— {avatar.label}</span>
-          )}
-        </div>
-        <div className="flex items-center gap-3 mt-0.5 text-[11px] font-mono">
-          <span className={hasImage ? "text-pf-ok" : "text-pf-muted"}>
-            {hasImage ? "✓ Image" : "— Image"}
-          </span>
-          <span className={hasVo ? "text-pf-ok" : "text-pf-muted"}>
-            {hasVo ? "✓ VO" : "— VO"}
-          </span>
-          {error && <span className="text-pf-danger truncate">{error}</span>}
-        </div>
-      </div>
-
-      {/* Actions */}
-      <div className="flex items-center gap-1.5 shrink-0">
+    <div className="flex items-center gap-2 pl-[68px]">
+      <span className="text-[11px] font-mono uppercase tracking-wider text-pf-muted shrink-0 min-w-[56px]">
+        {label}
+      </span>
+      {isAudio && filled && (
+        // eslint-disable-next-line jsx-a11y/media-has-caption
+        <audio src={currentUrl} controls className="h-6 max-w-[180px] shrink-0" />
+      )}
+      <div className="flex items-center gap-1.5 ml-auto shrink-0">
+        {leftAction}
         <button
           type="button"
           onClick={() => fileInput.current?.click()}
           disabled={uploading}
           className="inline-flex items-center gap-1.5 text-xs font-semibold bg-pf-accent/15 border border-pf-accent/40 text-pf-accent hover:bg-pf-accent/25 rounded-md px-2.5 py-1.5 transition-colors disabled:opacity-40"
-          title={hasImage ? "Remplacer l'image" : "Uploader une image depuis ton PC"}
+          title={filled ? `Remplacer ${label.toLowerCase()}` : `Uploader ${label.toLowerCase()} depuis ton PC`}
         >
           {uploading ? (
             <Loader2 size={12} className="animate-spin" />
           ) : (
             <Upload size={12} />
           )}
-          {hasImage ? "Remplacer" : "Upload"}
+          {filled ? "Remplacer" : "Upload"}
         </button>
         <Link
-          href="/"
+          href={generateHref}
           target="_blank"
           className="inline-flex items-center gap-1.5 text-xs font-semibold text-pf-dim hover:text-pf-text border border-pf-border hover:border-pf-accent rounded-md px-2.5 py-1.5 transition-colors"
-          title="Ouvrir le studio image dans un nouvel onglet. Génère, puis utilise « 📎 Rattacher au brief » pour l'attacher ici."
+          title={generateTitle}
         >
           <Sparkles size={12} />
           Générer
         </Link>
-        {hasImage && (
+        {filled && (
           <button
             type="button"
-            onClick={() => onClear(briefId, hookId, avatar.id)}
+            onClick={onClear}
             className="inline-flex items-center justify-center w-8 h-8 text-pf-muted hover:text-pf-danger border border-pf-border hover:border-pf-danger rounded-md transition-colors"
-            title="Vider ce slot d'image (n'affecte pas la VO)"
+            title={`Vider ce slot ${label.toLowerCase()}`}
           >
             <X size={13} />
           </button>
         )}
-        <input
-          ref={fileInput}
-          type="file"
-          accept="image/png,image/jpeg,image/webp"
-          className="hidden"
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            e.target.value = "";
-            if (f) void handlePick(f);
-          }}
-        />
+        {error && <span className="text-[11px] text-pf-danger ml-1 max-w-[160px] truncate">{error}</span>}
       </div>
+      <input
+        ref={fileInput}
+        type="file"
+        accept={accept}
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          e.target.value = "";
+          if (f) void handlePick(f);
+        }}
+      />
     </div>
   );
 }

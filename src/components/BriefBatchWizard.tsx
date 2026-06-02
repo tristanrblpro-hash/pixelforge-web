@@ -946,20 +946,19 @@ export function BriefBatchWizard() {
     [startLsPolling],
   );
 
-  // Strict waves of 2: fire 2 lipsync jobs in parallel, wait for BOTH
-  // to land in a terminal state (done OR failed), then fire the next 2,
-  // and so on. Matches the user's request: predictable "2 en cours →
-  // 2 done → 2 en cours → 2 done → …" cadence with no idle workers.
+  // Strict sequential queue (one lipsync at a time). Replaces the older
+  // waves-of-2 runner. The user explicitly asked for "une par une" so
+  // they can verify each generated video before the next one starts.
+  // Per-row Generate buttons (triggerOneLipsync) sit alongside this for
+  // full manual control.
   const runLipsyncBatch = useCallback(async () => {
     if (lipsyncJobs.length === 0) return;
     lsAbortRef.current?.abort();
     const ac = new AbortController();
     lsAbortRef.current = ac;
-    const WAVE_SIZE = 2;
-    const queue = lipsyncJobs.slice();
-    while (queue.length > 0 && !ac.signal.aborted) {
-      const wave = queue.splice(0, WAVE_SIZE);
-      await Promise.allSettled(wave.map((job) => runOneLipsync(job)));
+    for (const job of lipsyncJobs) {
+      if (ac.signal.aborted) break;
+      await runOneLipsync(job);
     }
   }, [lipsyncJobs, runOneLipsync]);
 
@@ -967,6 +966,27 @@ export function BriefBatchWizard() {
     lsAbortRef.current?.abort();
     // Note: in-flight polling continues — Kling jobs keep running on their side.
   }, []);
+
+  // Manual one-shot trigger for the per-row "Générer ce lipsync" button.
+  // Resolves the (briefId, hookId, avatarId) into a LipsyncJob and runs
+  // exactly one job. Refuses if the slot is missing image or VO clip.
+  const triggerOneLipsync = useCallback(
+    async (briefId: string, hookId: string, avatarId: string) => {
+      const brief = briefs.get(briefId);
+      if (!brief) return;
+      const hook = brief.hooks.find((h) => h.id === hookId);
+      const avatar = hook?.avatars.find((a) => a.id === avatarId);
+      if (!hook || !avatar) return;
+      if (!avatar.imageUrl || !avatar.voClipUrl) return;
+      await runOneLipsync({
+        id: `${briefId}:${hookId}:${avatarId}`,
+        briefId,
+        hookId,
+        avatar,
+      });
+    },
+    [briefs, runOneLipsync],
+  );
 
   // -----------------------------------------------------------------------
   // Step 6 — Notion sync
@@ -1128,6 +1148,7 @@ export function BriefBatchWizard() {
             lipsyncState={lipsyncState}
             onRunAll={runLipsyncBatch}
             onCancel={cancelLipsyncBatch}
+            onTriggerOne={triggerOneLipsync}
             pendingCount={lipsyncJobs.length}
             anyRunning={Array.from(lipsyncState.values()).some((s) => s.status === "running")}
             onOpenBrief={(id) => router.push(`/briefs/${id}`)}
@@ -2386,6 +2407,7 @@ function Step6Lipsync({
   lipsyncState,
   onRunAll,
   onCancel,
+  onTriggerOne,
   pendingCount,
   anyRunning,
   onOpenBrief,
@@ -2394,6 +2416,7 @@ function Step6Lipsync({
   lipsyncState: Map<string, LsCellState>;
   onRunAll: () => void;
   onCancel: () => void;
+  onTriggerOne: (briefId: string, hookId: string, avatarId: string) => Promise<void>;
   pendingCount: number;
   anyRunning: boolean;
   onOpenBrief: (id: string) => void;
@@ -2442,8 +2465,8 @@ function Step6Lipsync({
   return (
     <div className="space-y-5">
       <Intro
-        title="Génère tous les lipsyncs"
-        body="On envoie à Kling 2 lipsyncs en parallèle. Dès que les deux sont terminés (succès ou erreur), on lance les 2 suivants — et ainsi de suite. Chaque vidéo s'attribue automatiquement au bon brief. Compte ~1 min par lipsync."
+        title="Vérifie chaque paire (image + VO), puis génère les lipsyncs"
+        body="Chaque avatar affiche sa miniature d'image et son player audio pour que tu vérifies que ça matche avant de générer. Click « Générer » sur la row pour lancer ce lipsync seul, ou « Lancer la file (séquentiel) » en haut pour les enchaîner UN PAR UN. Chaque vidéo s'attribue automatiquement au bon brief."
       />
 
       <div className="bg-pf-elev border border-pf-border rounded-2xl px-5 py-4 flex flex-wrap items-center gap-3">
@@ -2468,119 +2491,306 @@ function Step6Lipsync({
             onClick={onRunAll}
             disabled={pendingCount === 0}
             className="bg-pf-accent text-pf-accent-fg font-bold rounded-lg px-5 py-2.5 text-sm inline-flex items-center gap-2 disabled:opacity-40 hover:bg-pf-accent/90 transition-colors"
+            title="Lance les lipsyncs un par un (séquentiel). Tu vois chacun se finir avant que le suivant ne démarre."
           >
             <Sparkles size={14} />
             {pendingCount === 0
               ? totals.notReady > 0
                 ? "Avatars incomplets — assigne images + voix"
                 : "Tout est généré ✓"
-              : `Générer les ${pendingCount} lipsyncs`}
+              : `Lancer la file (${pendingCount} séquentiel)`}
           </button>
         )}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {withAvatars.map((b) => {
-          const slots: { hookId: string; av: AvatarSlot; hookLabel: string }[] = [];
-          for (const h of b.hooks) {
-            const hookLabel = h.index === 1 ? "V1" : `H${h.index}`;
-            for (const av of h.avatars) {
-              slots.push({ hookId: h.id, av, hookLabel });
-            }
-          }
-          const briefDone = slots.every(
-            (s) => s.av.lipsyncStatus === "done" && s.av.lipsyncVideoUrl,
-          );
-          return (
-            <div
-              key={b.id}
-              className={`bg-pf-elev border rounded-2xl overflow-hidden ${
-                briefDone ? "border-pf-ok/40" : "border-pf-border"
-              }`}
-            >
-              <div className="flex items-center justify-between px-5 py-3.5 border-b border-pf-border bg-pf-soft/40">
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <div className="w-9 h-9 rounded-lg bg-pf-accent/15 border border-pf-accent/30 text-pf-accent flex items-center justify-center shrink-0">
-                    <Video size={16} />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-base font-bold truncate">{b.adsetName}</div>
-                    <div className="text-sm text-pf-muted font-mono">
-                      {slots.filter((s) => s.av.lipsyncStatus === "done").length} / {slots.length}{" "}
-                      lipsyncs
-                    </div>
-                  </div>
-                </div>
-                {briefDone ? (
-                  <BadgeOK label="OK" />
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => onOpenBrief(b.id)}
-                    className="text-sm text-pf-accent hover:underline inline-flex items-center gap-1"
-                  >
-                    Détails
-                    <ArrowRight size={12} />
-                  </button>
-                )}
-              </div>
-
-              <div className="divide-y divide-pf-border">
-                {slots.map(({ hookId, av, hookLabel }) => {
-                  const key = `${b.id}:${hookId}:${av.id}`;
-                  const s = lipsyncState.get(key);
-                  const url = av.lipsyncVideoUrl || s?.url;
-                  const status: LsCellStatus =
-                    av.lipsyncStatus === "done"
-                      ? "done"
-                      : (s?.status ?? (av.imageUrl && av.voClipUrl ? "idle" : "idle"));
-                  const ready = av.imageUrl && av.voClipUrl;
-                  return (
-                    <div key={key} className="px-5 py-3 flex items-center gap-3">
-                      <span className="text-sm font-bold font-mono text-pf-text bg-pf-soft border border-pf-border rounded-md px-2 py-0.5 shrink-0">
-                        {hookLabel}
-                      </span>
-                      <span className="text-sm truncate flex-1">{av.label}</span>
-                      {!ready ? (
-                        <Pill label="Image/VO manquant" tone="muted" />
-                      ) : status === "done" ? (
-                        <span className="inline-flex items-center gap-1.5 text-pf-ok text-sm">
-                          <Check size={14} className="pf-success-pop" />
-                          Done
-                        </span>
-                      ) : status === "running" ? (
-                        <span className="inline-flex items-center gap-2 text-pf-warn text-sm">
-                          <span className="w-2 h-2 rounded-full bg-pf-warn pf-pulse-dot" />
-                          En cours
-                        </span>
-                      ) : status === "error" ? (
-                        <span className="text-pf-danger text-sm" title={s?.error}>
-                          Erreur
-                        </span>
-                      ) : (
-                        <span className="text-pf-muted text-sm">Idle</span>
-                      )}
-                      {url && (
-                        <a
-                          href={url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-pf-accent text-sm hover:underline inline-flex items-center gap-1"
-                        >
-                          Voir
-                          <ExternalLink size={11} />
-                        </a>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          );
-        })}
+      <div className="space-y-4">
+        {withAvatars.map((b) => (
+          <BriefLipsyncList
+            key={b.id}
+            brief={b}
+            lipsyncState={lipsyncState}
+            onTriggerOne={onTriggerOne}
+            onOpenBrief={onOpenBrief}
+          />
+        ))}
       </div>
     </div>
   );
+}
+
+// Same shape as BriefImageList (Step 5): brief header + per-hook groups
+// + per-avatar rows. But each row shows the IMAGE + VO inputs so the
+// user can verify the pair, plus a "Générer ce lipsync" button.
+function BriefLipsyncList({
+  brief,
+  lipsyncState,
+  onTriggerOne,
+  onOpenBrief,
+}: {
+  brief: Brief;
+  lipsyncState: Map<string, LsCellState>;
+  onTriggerOne: (briefId: string, hookId: string, avatarId: string) => Promise<void>;
+  onOpenBrief: (id: string) => void;
+}) {
+  const slots = brief.hooks.flatMap((h) => h.avatars);
+  const briefDone =
+    slots.length > 0 &&
+    slots.every((a) => a.lipsyncStatus === "done" && a.lipsyncVideoUrl);
+  const doneCount = slots.filter(
+    (a) => a.lipsyncStatus === "done" && a.lipsyncVideoUrl,
+  ).length;
+  const hooksWithAvatars = brief.hooks.filter((h) => h.avatars.length > 0);
+
+  return (
+    <div
+      className={`bg-pf-elev border rounded-2xl overflow-hidden ${
+        briefDone ? "border-pf-ok/40" : "border-pf-border"
+      }`}
+    >
+      <div className="flex items-center justify-between gap-3 px-5 py-3.5 border-b border-pf-border bg-pf-soft/40">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-10 h-10 rounded-xl bg-pf-accent/15 border border-pf-accent/30 text-pf-accent flex items-center justify-center shrink-0">
+            <Video size={16} />
+          </div>
+          <div className="min-w-0">
+            <div className="text-base font-bold truncate">{brief.adsetName}</div>
+            <div className="text-sm text-pf-muted font-mono mt-0.5">
+              {doneCount}/{slots.length} lipsyncs
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => onOpenBrief(brief.id)}
+            className="inline-flex items-center gap-1.5 text-xs font-semibold text-pf-dim hover:text-pf-text border border-pf-border hover:border-pf-accent rounded-md px-2.5 py-1.5 transition-colors"
+            title="Ouvrir le wizard détaillé du brief"
+          >
+            Wizard
+            <ArrowRight size={11} />
+          </button>
+          {briefDone && <BadgeOK label="OK" />}
+        </div>
+      </div>
+
+      <div className="divide-y divide-pf-border">
+        {hooksWithAvatars.map((h) => (
+          <HookLipsyncGroup
+            key={h.id}
+            briefId={brief.id}
+            hook={h}
+            lipsyncState={lipsyncState}
+            onTriggerOne={onTriggerOne}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function HookLipsyncGroup({
+  briefId,
+  hook,
+  lipsyncState,
+  onTriggerOne,
+}: {
+  briefId: string;
+  hook: HookBrief;
+  lipsyncState: Map<string, LsCellState>;
+  onTriggerOne: (briefId: string, hookId: string, avatarId: string) => Promise<void>;
+}) {
+  const label = hook.index === 1 ? "V1 — Original" : `Hook ${hook.index}`;
+  const doneHere = hook.avatars.filter(
+    (a) => a.lipsyncStatus === "done" && a.lipsyncVideoUrl,
+  ).length;
+  return (
+    <div>
+      <div className="flex items-center gap-3 px-5 py-2.5 bg-pf-bg/40 border-b border-pf-border/60">
+        <span className="inline-flex items-center justify-center text-xs font-bold font-mono text-pf-text bg-pf-soft border border-pf-border rounded-md px-2 py-0.5 min-w-[48px]">
+          {hook.index === 1 ? "V1" : `H${hook.index}`}
+        </span>
+        <div className="text-sm font-semibold text-pf-text">{label}</div>
+        <span className="text-xs text-pf-muted font-mono ml-auto">
+          {doneHere}/{hook.avatars.length} lipsyncs
+        </span>
+      </div>
+      <div className="divide-y divide-pf-border/40">
+        {hook.avatars.map((av, idx) => (
+          <LipsyncSlotRow
+            key={av.id}
+            briefId={briefId}
+            hookId={hook.id}
+            avatar={av}
+            avatarIdx={idx}
+            state={lipsyncState.get(`${briefId}:${hook.id}:${av.id}`)}
+            onTriggerOne={onTriggerOne}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LipsyncSlotRow({
+  briefId,
+  hookId,
+  avatar,
+  avatarIdx,
+  state,
+  onTriggerOne,
+}: {
+  briefId: string;
+  hookId: string;
+  avatar: AvatarSlot;
+  avatarIdx: number;
+  state: LsCellState | undefined;
+  onTriggerOne: (briefId: string, hookId: string, avatarId: string) => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const hasImage = !!avatar.imageUrl;
+  const hasVo = !!avatar.voClipUrl;
+  const ready = hasImage && hasVo;
+  const done = avatar.lipsyncStatus === "done" && !!avatar.lipsyncVideoUrl;
+  const url = avatar.lipsyncVideoUrl || state?.url;
+  const status: LsCellStatus = done
+    ? "done"
+    : state?.status ?? "idle";
+
+  const handleGenerate = useCallback(async () => {
+    if (!ready || done || status === "running") return;
+    setBusy(true);
+    try {
+      await onTriggerOne(briefId, hookId, avatar.id);
+    } finally {
+      setBusy(false);
+    }
+  }, [briefId, hookId, avatar.id, onTriggerOne, ready, done, status]);
+
+  return (
+    <div className="px-5 py-3 flex items-center gap-3 flex-wrap md:flex-nowrap">
+      {/* Thumbnail */}
+      <div className="w-16 h-16 rounded-lg border border-pf-border bg-pf-bg shrink-0 flex items-center justify-center overflow-hidden">
+        {hasImage ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={avatar.imageUrl!}
+            alt={avatar.label}
+            className="w-full h-full object-cover"
+          />
+        ) : (
+          <ImageIcon size={20} className="text-pf-muted" />
+        )}
+      </div>
+
+      {/* Label + audio + status */}
+      <div className="flex-1 min-w-0 space-y-1.5">
+        <div className="text-sm font-semibold text-pf-text truncate">
+          Avatar {avatarIdx + 1}
+          {avatar.label && avatar.label !== `Avatar IA ${avatarIdx + 1}` && (
+            <span className="text-pf-muted ml-1.5 font-normal">— {avatar.label}</span>
+          )}
+        </div>
+        {hasVo ? (
+          // eslint-disable-next-line jsx-a11y/media-has-caption
+          <audio src={avatar.voClipUrl} controls className="h-7 max-w-full" />
+        ) : (
+          <div className="text-[11px] text-pf-muted">
+            Pas de voix off rattachée — retourne à l&apos;étape 5
+          </div>
+        )}
+      </div>
+
+      {/* Status + actions */}
+      <div className="flex items-center gap-2 shrink-0">
+        <LipsyncStatusBadge status={status} ready={ready} hasImage={hasImage} hasVo={hasVo} error={state?.error} />
+        {url && (
+          <a
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 text-xs font-semibold text-pf-accent hover:underline border border-pf-border hover:border-pf-accent rounded-md px-2.5 py-1.5"
+            title="Ouvrir la vidéo lipsync générée"
+          >
+            <ExternalLink size={11} />
+            Voir vidéo
+          </a>
+        )}
+        <button
+          type="button"
+          onClick={handleGenerate}
+          disabled={!ready || done || status === "running" || busy}
+          className={`inline-flex items-center gap-1.5 text-xs font-semibold rounded-md px-2.5 py-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+            done
+              ? "bg-pf-soft border border-pf-border text-pf-muted"
+              : "bg-pf-accent text-pf-accent-fg hover:bg-pf-accent/90 border border-pf-accent"
+          }`}
+          title={
+            !ready
+              ? "Il manque l'image ou la VO — retourne à l'étape 5"
+              : done
+                ? "Déjà généré — utilise « Voir vidéo »"
+                : status === "running"
+                  ? "En cours — attends la fin"
+                  : "Lancer Kling pour ce lipsync"
+          }
+        >
+          {status === "running" || busy ? (
+            <Loader2 size={11} className="animate-spin" />
+          ) : (
+            <Sparkles size={11} />
+          )}
+          {done ? "Done" : status === "running" ? "En cours…" : "Générer"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function LipsyncStatusBadge({
+  status,
+  ready,
+  hasImage,
+  hasVo,
+  error,
+}: {
+  status: LsCellStatus;
+  ready: boolean;
+  hasImage: boolean;
+  hasVo: boolean;
+  error?: string;
+}) {
+  if (!ready) {
+    const missing: string[] = [];
+    if (!hasImage) missing.push("image");
+    if (!hasVo) missing.push("VO");
+    return (
+      <Pill label={`${missing.join(" + ")} manquant${missing.length > 1 ? "s" : ""}`} tone="muted" />
+    );
+  }
+  if (status === "done") {
+    return (
+      <span className="inline-flex items-center gap-1 text-pf-ok text-xs font-semibold">
+        <Check size={12} className="pf-success-pop" />
+        Done
+      </span>
+    );
+  }
+  if (status === "running") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-pf-warn text-xs font-semibold">
+        <span className="w-1.5 h-1.5 rounded-full bg-pf-warn pf-pulse-dot" />
+        En cours
+      </span>
+    );
+  }
+  if (status === "error") {
+    return (
+      <span className="text-pf-danger text-xs font-semibold" title={error}>
+        Erreur
+      </span>
+    );
+  }
+  return <span className="text-pf-muted text-xs">Prêt</span>;
 }
 
 // ===========================================================================

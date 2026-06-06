@@ -115,12 +115,20 @@ export function GdocImportModal({ onClose, onImported }: Props) {
         //   - Scene setups (UPPERCASE markers from V1 body) — shared
         //     across all hooks since the video structure is the same.
         //   - Per-hook monteur notes (lines starting with `>`).
+        // IA / workflow instructions (`@`-prefixed) land in a separate
+        // `aiInstructions` field so the wizard can render them as a
+        // distinct directive card and Notion can sync them to a
+        // dedicated section.
         for (let i = 0; i < b.hooks.length; i++) {
           const hook = b.hooks[i];
           if (!hook) continue;
-          const personalNotes = ad.hookNotes[i] ?? [];
-          const composed = composeFilmingNotes(ad.scenes, personalNotes);
+          const monteurNotes = ad.hookNotes[i] ?? [];
+          const composed = composeFilmingNotes(ad.scenes, monteurNotes);
           if (composed) hook.notes = composed;
+          const aiInstr = ad.hookAiInstructions[i] ?? [];
+          if (aiInstr.length > 0) {
+            hook.aiInstructions = aiInstr.join("\n");
+          }
         }
         const saved = upsertBrief(b);
         created.push(saved);
@@ -407,6 +415,30 @@ function AdPreview({ ad }: { ad: ParsedAd }) {
           </div>
         </div>
       )}
+
+      {ad.hookAiInstructions.some((n) => n.length > 0) && (
+        <div className="mt-2 pt-2 border-t border-pf-warn/40">
+          <div className="text-[10px] uppercase tracking-wider text-pf-warn font-bold mb-1">
+            Instructions IA / workflow (
+            {ad.hookAiInstructions.reduce((acc, n) => acc + n.length, 0)})
+          </div>
+          <div className="space-y-0.5 text-[10px] text-pf-dim">
+            {ad.hookAiInstructions.map(
+              (instr, idx) =>
+                instr.length > 0 && (
+                  <div key={idx} className="flex gap-1.5">
+                    <span className="font-mono font-bold text-pf-warn shrink-0">
+                      {idx === 0 ? "V1" : `H${idx + 1}`}
+                    </span>
+                    <span className="line-clamp-2 leading-snug">
+                      {instr.join(" · ")}
+                    </span>
+                  </div>
+                ),
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -467,6 +499,12 @@ const LEGEND_ITEMS: LegendItem[] = [
     body: "Atterrit dans Filming notes de Notion, par hook.",
   },
   {
+    marker: "@",
+    chipClass: "bg-pf-warn/15 text-pf-warn border-pf-warn/40",
+    title: "Instruction IA / workflow",
+    body: "Directive pour le SaaS et le monteur. Affichée en orange dans le wizard + section dédiée sur Notion.",
+  },
+  {
     marker: "ABC",
     chipClass: "bg-pf-warn/15 text-pf-warn border-pf-warn/40 font-bold",
     title: "Setup vidéo",
@@ -500,16 +538,21 @@ const LEGEND_PLAINTEXT = `=== CONVENTIONS DU DOC PIXELFORGE ===
    Atterrit dans Filming notes Notion, par hook.
    Ex: > Couper silence après "patch"
 
-3. EN MAJUSCULES → Setup vidéo / scène
+3. @  → Instruction IA / workflow
+   Directive pour le SaaS et le monteur. Affichée en orange dans
+   le wizard + section dédiée sur Notion.
+   Ex: @ Le hook ne remplace pas l'original, il vient devant
+
+4. EN MAJUSCULES → Setup vidéo / scène
    Ligne courte entièrement majuscule = indication de tournage.
    Strippée du VO, affichée dans Filming notes.
    Ex: HOMME DERMATO LUNETTE #1 :
 
-4. Référence: / Avatars: → Métadonnées du brief
+5. Référence: / Avatars: → Métadonnées du brief
    Référence: <URL>            (créa concurrente à répliquer)
    Avatars: V1=2, H2=1, H3=0   (nb d'avatars par hook, 0 OK)
 
-5. Ad #N → Headers de hook (1 à 50, détecté automatiquement)
+6. Ad #N → Headers de hook (1 à 50, détecté automatiquement)
    Ad Test #1 - <Créa>          (titre du brief, obligatoire)
    Ad #1 - <Créa> (Original)    (= V1, script complet)
    Ad #2 - <Créa> - Hook 2      (variante d'ouverture seule)
@@ -656,9 +699,11 @@ Ad #1 - Anti-Fake Dermato - Hook 1 (Original)
 "Eye bags can actually get worse if you pick up a fake microneedle patch."
 
 Ad #2 - Anti-Fake Dermato - Hook 2
+@ Le hook ne remplace pas l'original, il vient devant
 "People keep asking if you're tired..."
 
 Ad #3 - Anti-Fake Dermato - Hook 3
+@ Le hook ne remplace pas l'original, il vient devant
 "Those heavy bags under your eyes..."
 
 — autre brief —

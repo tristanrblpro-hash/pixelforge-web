@@ -47,6 +47,15 @@ export type HookBrief = {
   // the next (different b-rolls, different captions, etc.). Surfaced both
   // on the hook's Récap step and on the final brief summary.
   notes?: string;
+  // Workflow-level directives the user wants the SaaS / monteur / IA to
+  // remember when working on this hook. Distinct from `notes`:
+  //   - `notes` = filming directions (what to shoot, where to cut)
+  //   - `aiInstructions` = how the hook fits in the final video, special
+  //     handling rules, things that would influence prompts later.
+  // Imported from `@`-prefixed lines in the Google Doc. Shown as an
+  // orange directive card in the wizard and synced to Notion in its own
+  // "Instructions" section. Free-form multi-line text.
+  aiInstructions?: string;
   // Notion sync — one page per hook (1 variation = 1 Notion page).
   notionPageId?: string;
   notionUrl?: string;

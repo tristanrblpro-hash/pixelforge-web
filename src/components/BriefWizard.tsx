@@ -1287,6 +1287,23 @@ function HookSummaryStep({
           className="w-full bg-pf-soft border border-pf-border rounded-md px-3 py-2.5 text-sm placeholder:text-pf-muted resize-y focus:outline-none focus:border-pf-accent"
         />
       </Field>
+
+      {/* IA / workflow directives (e.g. "@ Le hook ne remplace pas
+          l'original, il vient devant"). Distinct from monteur notes so
+          the user can tell operational rules from filming directions
+          at a glance. */}
+      <Field
+        label={`Instructions IA / workflow — ${phaseLabel(hook.index)}`}
+        hint="Directives importées des lignes `@` du Google Doc, ou ajoutées à la main. Synchronisées dans une section dédiée sur Notion."
+      >
+        <textarea
+          value={hook.aiInstructions ?? ""}
+          onChange={(e) => onUpdateHook({ aiInstructions: e.target.value })}
+          rows={3}
+          placeholder="Ex: Le hook ne remplace pas l'original, il vient devant. Garder le CTA final intact."
+          className="w-full bg-pf-warn/5 border border-pf-warn/40 rounded-md px-3 py-2.5 text-sm placeholder:text-pf-muted resize-y focus:outline-none focus:border-pf-warn"
+        />
+      </Field>
     </div>
   );
 }
@@ -1543,6 +1560,16 @@ function FinalSummaryStep({
                       />
                     </div>
                   ))}
+              </div>
+            ) : null}
+            {h.aiInstructions?.trim() ? (
+              <div className="bg-pf-warn/5 border border-pf-warn/40 rounded-md p-3 mt-2">
+                <div className="text-[10px] uppercase tracking-[1.2px] text-pf-warn font-semibold mb-1">
+                  Instructions IA / workflow
+                </div>
+                <p className="text-[12px] text-pf-text whitespace-pre-wrap leading-relaxed">
+                  {h.aiInstructions}
+                </p>
               </div>
             ) : null}
             {h.notes?.trim() ? (

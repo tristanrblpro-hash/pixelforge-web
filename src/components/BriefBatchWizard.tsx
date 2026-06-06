@@ -408,7 +408,11 @@ export function BriefBatchWizard() {
   // -----------------------------------------------------------------------
 
   const updateHookField = useCallback(
-    (briefId: string, hookId: string, patch: { hookScript?: string; notes?: string }) => {
+    (
+      briefId: string,
+      hookId: string,
+      patch: { hookScript?: string; notes?: string; aiInstructions?: string },
+    ) => {
       const brief = briefs.get(briefId);
       if (!brief) return;
       const next: Brief = {
@@ -1634,15 +1638,22 @@ function Step3Scripts({
   onUpdateBrief,
 }: {
   briefs: Brief[];
-  onUpdateHook: (briefId: string, hookId: string, patch: { hookScript?: string; notes?: string }) => void;
+  onUpdateHook: (
+    briefId: string,
+    hookId: string,
+    patch: { hookScript?: string; notes?: string; aiInstructions?: string },
+  ) => void;
   onUpdateBrief: (briefId: string, patch: { creativeRef?: string; notes?: string }) => void;
 }) {
   const [openId, setOpenId] = useState<string | null>(briefs[0]?.id ?? null);
   const [drafts, setDrafts] = useState<Record<string, string>>(() => {
     const o: Record<string, string> = {};
     for (const b of briefs) {
-      for (const h of b.hooks) o[`${b.id}:${h.id}:script`] = h.hookScript;
-      for (const h of b.hooks) o[`${b.id}:${h.id}:notes`] = h.notes ?? "";
+      for (const h of b.hooks) {
+        o[`${b.id}:${h.id}:script`] = h.hookScript;
+        o[`${b.id}:${h.id}:notes`] = h.notes ?? "";
+        o[`${b.id}:${h.id}:ai`] = h.aiInstructions ?? "";
+      }
       o[`${b.id}:ref`] = b.creativeRef ?? "";
     }
     return o;
@@ -1656,8 +1667,10 @@ function Step3Scripts({
         for (const h of b.hooks) {
           const k1 = `${b.id}:${h.id}:script`;
           const k2 = `${b.id}:${h.id}:notes`;
+          const k4 = `${b.id}:${h.id}:ai`;
           if (next[k1] === undefined) next[k1] = h.hookScript;
           if (next[k2] === undefined) next[k2] = h.notes ?? "";
+          if (next[k4] === undefined) next[k4] = h.aiInstructions ?? "";
         }
         const k3 = `${b.id}:ref`;
         if (next[k3] === undefined) next[k3] = b.creativeRef ?? "";
@@ -1709,8 +1722,14 @@ function Step3Scripts({
                 {b.hooks.map((h) => {
                   const sk = `${b.id}:${h.id}:script`;
                   const nk = `${b.id}:${h.id}:notes`;
+                  const ak = `${b.id}:${h.id}:ai`;
                   const nKey = `${b.id}:${h.id}`;
                   const showNotes = notesOpen[nKey] ?? !!drafts[nk]?.trim();
+                  // IA directives: always shown when populated (came
+                  // from `@` lines in the doc → user already cares),
+                  // toggleable when empty. Same UX as notes monteur.
+                  const aKey = `${b.id}:${h.id}:ai-open`;
+                  const showAi = notesOpen[aKey] ?? !!drafts[ak]?.trim();
                   const label =
                     h.index === 1
                       ? "V1 — Original (script complet)"
@@ -1739,14 +1758,24 @@ function Step3Scripts({
                         rows={h.index === 1 ? 6 : 3}
                         className="w-full bg-pf-bg border border-pf-border rounded-xl px-4 py-3 text-base focus:outline-none focus:border-pf-accent leading-relaxed resize-y"
                       />
-                      <button
-                        type="button"
-                        onClick={() => setNotesOpen((m) => ({ ...m, [nKey]: !showNotes }))}
-                        className="text-xs text-pf-muted hover:text-pf-text inline-flex items-center gap-1"
-                      >
-                        {showNotes ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                        Note monteur {showNotes ? "" : "(optionnelle)"}
-                      </button>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setNotesOpen((m) => ({ ...m, [nKey]: !showNotes }))}
+                          className="text-xs text-pf-muted hover:text-pf-text inline-flex items-center gap-1"
+                        >
+                          {showNotes ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                          Note monteur {showNotes ? "" : "(optionnelle)"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setNotesOpen((m) => ({ ...m, [aKey]: !showAi }))}
+                          className="text-xs text-pf-warn/80 hover:text-pf-warn inline-flex items-center gap-1"
+                        >
+                          {showAi ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                          Instruction IA / workflow {showAi ? "" : "(optionnelle)"}
+                        </button>
+                      </div>
                       {showNotes && (
                         <textarea
                           value={drafts[nk] ?? ""}
@@ -1757,6 +1786,20 @@ function Step3Scripts({
                           placeholder="Indications de montage spécifiques à ce hook (b-rolls, overlay, rythme…)"
                           rows={2}
                           className="w-full bg-pf-bg border border-pf-border rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-pf-accent leading-relaxed resize-y italic"
+                        />
+                      )}
+                      {showAi && (
+                        <textarea
+                          value={drafts[ak] ?? ""}
+                          onChange={(e) =>
+                            setDrafts((d) => ({ ...d, [ak]: e.target.value }))
+                          }
+                          onBlur={() =>
+                            onUpdateHook(b.id, h.id, { aiInstructions: drafts[ak] ?? "" })
+                          }
+                          placeholder="Directive pour le SaaS et le monteur (ex: « Le hook ne remplace pas l'original, il vient devant »)"
+                          rows={2}
+                          className="w-full bg-pf-warn/5 border border-pf-warn/40 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-pf-warn leading-relaxed resize-y"
                         />
                       )}
                     </div>

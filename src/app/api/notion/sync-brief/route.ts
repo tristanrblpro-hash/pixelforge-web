@@ -310,6 +310,16 @@ function buildHookPage(brief: Brief, hook: HookBrief): NotionBlock[] {
     blocks.push(dividerBlock());
   }
 
+  // 5b. IA / workflow instructions — directives the user wants the
+  // SaaS, the monteur, AND any downstream IA prompt to remember. Kept
+  // in a dedicated section above the avatar files so the monteur sees
+  // them before touching the assets.
+  if (hook.aiInstructions?.trim()) {
+    blocks.push(heading2Block("Instructions IA / workflow:"));
+    blocks.push(...paragraphParaSplit(hook.aiInstructions));
+    blocks.push(dividerBlock());
+  }
+
   // 6. AI Avatar (one bullet per finished lipsync, link to Drive file)
   const doneAvatars = hook.avatars.filter(
     (a) => a.lipsyncStatus === "done" && a.lipsyncVideoUrl,

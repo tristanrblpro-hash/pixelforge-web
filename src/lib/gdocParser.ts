@@ -66,6 +66,13 @@ export type ParsedAd = {
    *  section (→ that hook) are collected here. The import flow merges
    *  them with the scene setups into hook.notes (Notion "Filming notes"). */
   hookNotes: string[][];
+  /** Directives addressed to the SaaS / IA / workflow per hook. Lines
+   *  prefixed with `@` (e.g. "@ Le hook ne remplace pas l'original,
+   *  il vient devant") land here. Surfaced as an orange directive card
+   *  in the wizard and synced to Notion in its own "Instructions"
+   *  section — kept distinct from `hookNotes` so the monteur can tell
+   *  filming directions from operational rules. */
+  hookAiInstructions: string[][];
 };
 
 /** Cap so we don't accidentally create thousands of hooks on a malformed
@@ -229,7 +236,9 @@ function parseAdBlock(
   body = body.replace(LABEL_LINE_REGEX_G, "").trim();
   const { spoken: bodyAfterScenes, scenes } = stripSceneHeaders(body);
   const { spoken: bodyAfterNotes, notes: v1Notes } = extractMonteurNotes(bodyAfterScenes);
-  body = bodyAfterNotes;
+  const { spoken: bodyAfterAi, instructions: v1AiInstr } =
+    extractAiInstructions(bodyAfterNotes);
+  body = bodyAfterAi;
 
   if (!body) {
     warnings.push(`${briefName} : corps de script vide.`);
@@ -243,6 +252,7 @@ function parseAdBlock(
   //    — the doc decides how many hooks the brief gets.
   const linesByIdx: Record<number, string | undefined> = {};
   const notesByIdx: Record<number, string[]> = {};
+  const aiInstrByIdx: Record<number, string[]> = {};
   let maxHookIdx = 0;
 
   for (let i = 0; i < hookMatches.length; i++) {
@@ -265,6 +275,7 @@ function parseAdBlock(
     if (hookIdx < 1 || hookIdx > MAX_HOOKS) continue;
     if (hookIdx > maxHookIdx) maxHookIdx = hookIdx;
     if (!notesByIdx[hookIdx]) notesByIdx[hookIdx] = [];
+    if (!aiInstrByIdx[hookIdx]) aiInstrByIdx[hookIdx] = [];
 
     const start = (hm.index ?? 0) + hm[0].length;
     const end =
@@ -278,6 +289,11 @@ function parseAdBlock(
       if (trimmed.startsWith(">")) {
         const clean = trimmed.replace(/^>+\s*/, "").trim();
         if (clean) notesByIdx[hookIdx].push(clean);
+        continue;
+      }
+      if (trimmed.startsWith("@")) {
+        const clean = trimmed.replace(/^@+\s*/, "").trim();
+        if (clean) aiInstrByIdx[hookIdx].push(clean);
         continue;
       }
       // First non-note, non-empty line is the quoted opening — unless
@@ -298,15 +314,20 @@ function parseAdBlock(
   const totalHooks = Math.max(1, maxHookIdx);
   const finalHookLines: string[] = [];
   const finalHookNotes: string[][] = [];
+  const finalHookAiInstructions: string[][] = [];
   for (let idx = 1; idx <= totalHooks; idx++) {
     finalHookLines.push(linesByIdx[idx] ?? "");
     const notes = notesByIdx[idx] ?? [];
-    // V1 (idx=1) also receives the body-level monteur notes (lines
-    // starting with `>` that appear in the body before any hook header).
+    const ai = aiInstrByIdx[idx] ?? [];
+    // V1 (idx=1) also receives any body-level monteur notes / IA
+    // instructions (lines starting with `>` or `@` that appear in the
+    // body before any hook header).
     if (idx === 1) {
       finalHookNotes.push([...v1Notes, ...notes]);
+      finalHookAiInstructions.push([...v1AiInstr, ...ai]);
     } else {
       finalHookNotes.push(notes);
+      finalHookAiInstructions.push(ai);
     }
   }
 
@@ -331,6 +352,7 @@ function parseAdBlock(
     hookLines: finalHookLines,
     avatarsPerHook,
     hookNotes: finalHookNotes,
+    hookAiInstructions: finalHookAiInstructions,
   };
 }
 
@@ -352,6 +374,27 @@ function extractMonteurNotes(text: string): { spoken: string; notes: string[] } 
   }
   const spoken = spokenLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   return { spoken, notes };
+}
+
+// Sibling of extractMonteurNotes for `@`-prefixed IA / workflow
+// directives. Same shape — pull them out of the spoken body and return
+// them separately so the VO never reads them aloud and the wizard can
+// surface them as their own "Instructions" card.
+function extractAiInstructions(text: string): { spoken: string; instructions: string[] } {
+  const lines = text.split(/\n/);
+  const spokenLines: string[] = [];
+  const instructions: string[] = [];
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("@")) {
+      const clean = trimmed.replace(/^@+\s*/, "").trim();
+      if (clean) instructions.push(clean);
+      continue;
+    }
+    spokenLines.push(raw);
+  }
+  const spoken = spokenLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return { spoken, instructions };
 }
 
 // ---------------------------------------------------------------------------

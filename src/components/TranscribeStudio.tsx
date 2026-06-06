@@ -318,6 +318,10 @@ export function TranscribeStudio() {
     <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-6">
       {/* Main column */}
       <section className="space-y-5">
+        {/* YouTube quick transcript — extracts native captions, no local
+            ML pipeline needed. Self-contained: own state + result block. */}
+        <YoutubeBlock />
+
         {/* Drop zone */}
         <label
           onDragOver={(e) => {

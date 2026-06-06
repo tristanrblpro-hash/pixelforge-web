@@ -1337,6 +1337,7 @@ export function BriefBatchWizard() {
             onClearAvatarVo={clearAvatarVo}
             onUseHookVoForOneAvatar={useHookVoForOneAvatar}
             onPickFromV1={openV1Picker}
+            onSetAvatarCount={setHookAvatarCount}
           />
         )}
         {step === 6 && (
@@ -2254,11 +2255,13 @@ function Step5Images({
   briefs,
   onOpenBrief,
   onUseHookVoForAvatars,
+  onSetAvatarCount,
   ...handlers
 }: {
   briefs: Brief[];
   onOpenBrief: (id: string) => void;
   onUseHookVoForAvatars: (briefId: string) => void;
+  onSetAvatarCount: (briefId: string, hookId: string, target: number) => void;
 } & AvatarRowHandlers) {
   const withAvatars = briefs.filter((b) =>
     b.hooks.some((h) => h.avatars.length > 0),
@@ -2316,6 +2319,7 @@ function Step5Images({
             brief={b}
             onOpenBrief={onOpenBrief}
             onUseHookVoForAvatars={onUseHookVoForAvatars}
+            onSetAvatarCount={onSetAvatarCount}
             {...handlers}
           />
         ))}
@@ -2332,11 +2336,13 @@ function BriefImageList({
   brief,
   onOpenBrief,
   onUseHookVoForAvatars,
+  onSetAvatarCount,
   ...handlers
 }: {
   brief: Brief;
   onOpenBrief: (id: string) => void;
   onUseHookVoForAvatars: (briefId: string) => void;
+  onSetAvatarCount: (briefId: string, hookId: string, target: number) => void;
 } & AvatarRowHandlers) {
   const totalSlots = brief.hooks.reduce((acc, h) => acc + h.avatars.length, 0);
   const imagesAssigned = brief.hooks.reduce(
@@ -2354,9 +2360,12 @@ function BriefImageList({
     (h) => h.cutVoUrl && h.avatars.some((a) => !a.voClipUrl),
   );
 
-  // Only render hooks that have at least one avatar — empty hooks are
-  // a no-op here (their slot count is 0, so nothing to assign).
-  const hooksWithAvatars = brief.hooks.filter((h) => h.avatars.length > 0);
+  // Render hooks that have an avatar OR a script — a scripted hook with
+  // zero avatars still shows so the user can add forgotten avatars via
+  // the "+ Avatar" button in its sub-header.
+  const hooksWithAvatars = brief.hooks.filter(
+    (h) => h.avatars.length > 0 || h.hookScript.trim(),
+  );
   // The full V1 voice-off (hook index 1) is the source the segment picker
   // scrubs. Available to every avatar in this brief, not just hook 1.
   const v1HasVo = !!brief.hooks.find((h) => h.index === 1)?.cutVoUrl;
@@ -2420,6 +2429,7 @@ function BriefImageList({
             briefId={brief.id}
             hook={h}
             v1HasVo={v1HasVo}
+            onSetAvatarCount={onSetAvatarCount}
             {...handlers}
           />
         ))}
@@ -2432,15 +2442,23 @@ function HookAvatarGroup({
   briefId,
   hook,
   v1HasVo,
+  onSetAvatarCount,
   ...handlers
 }: {
   briefId: string;
   hook: HookBrief;
   v1HasVo: boolean;
+  onSetAvatarCount: (briefId: string, hookId: string, target: number) => void;
 } & AvatarRowHandlers) {
   const label = hook.index === 1 ? "V1 — Original" : `Hook ${hook.index}`;
   const imagesFilled = hook.avatars.filter((a) => a.imageUrl).length;
   const voFilled = hook.avatars.filter((a) => a.voClipUrl).length;
+  const count = hook.avatars.length;
+  // A slot can only be dropped if it's empty (no image / VO / lipsync) —
+  // safeResizeHookAvatars never deletes filled data.
+  const hasEmpty = hook.avatars.some(
+    (a) => !a.voClipUrl && !a.imageUrl && !a.lipsyncVideoUrl,
+  );
   return (
     <div>
       {/* Hook sub-header */}
@@ -2449,25 +2467,52 @@ function HookAvatarGroup({
           {hook.index === 1 ? "V1" : `H${hook.index}`}
         </span>
         <div className="text-sm font-semibold text-pf-text">{label}</div>
+        <div className="flex items-center gap-1.5">
+          {hasEmpty && (
+            <button
+              type="button"
+              onClick={() => onSetAvatarCount(briefId, hook.id, count - 1)}
+              className="inline-flex items-center justify-center text-pf-dim hover:text-pf-danger border border-pf-border hover:border-pf-danger rounded-md w-7 h-7 transition-colors"
+              title="Retirer un avatar vide de ce hook"
+            >
+              <X size={13} />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => onSetAvatarCount(briefId, hook.id, count + 1)}
+            className="inline-flex items-center gap-1.5 text-xs font-semibold bg-pf-soft border border-pf-border hover:border-pf-accent text-pf-text hover:text-pf-accent rounded-md px-2.5 py-1 transition-colors"
+            title="Ajouter un avatar IA à ce hook (les avatars déjà remplis sont conservés)"
+          >
+            <Plus size={12} />
+            Avatar
+          </button>
+        </div>
         <span className="text-xs text-pf-muted font-mono ml-auto">
-          {imagesFilled}/{hook.avatars.length} img · {voFilled}/{hook.avatars.length} VO
+          {imagesFilled}/{count} img · {voFilled}/{count} VO
         </span>
       </div>
       {/* Avatar rows */}
-      <div className="divide-y divide-pf-border/40">
-        {hook.avatars.map((av, idx) => (
-          <AvatarSlotRow
-            key={av.id}
-            briefId={briefId}
-            hookId={hook.id}
-            hookHasVo={!!hook.cutVoUrl}
-            v1HasVo={v1HasVo}
-            avatar={av}
-            avatarIdx={idx}
-            {...handlers}
-          />
-        ))}
-      </div>
+      {count === 0 ? (
+        <div className="px-5 py-4 text-sm text-pf-muted">
+          Aucun avatar pour ce hook. Clique « + Avatar » pour en ajouter un.
+        </div>
+      ) : (
+        <div className="divide-y divide-pf-border/40">
+          {hook.avatars.map((av, idx) => (
+            <AvatarSlotRow
+              key={av.id}
+              briefId={briefId}
+              hookId={hook.id}
+              hookHasVo={!!hook.cutVoUrl}
+              v1HasVo={v1HasVo}
+              avatar={av}
+              avatarIdx={idx}
+              {...handlers}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

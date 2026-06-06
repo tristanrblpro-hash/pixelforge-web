@@ -518,21 +518,25 @@ export function BriefBatchWizard() {
         }
         if (e.ok) {
           const [briefId, hookId] = e.id.split(":");
-          const brief = briefs.get(briefId);
-          if (brief) {
+          // Read the CURRENT brief from state (not the stale closure
+          // snapshot). With concurrency, several hooks of the same brief
+          // finish in quick succession — building each `next` from the
+          // captured `briefs` map would make every write clobber the
+          // previous hook's cutVoUrl, so only the last one survived.
+          setBriefs((m) => {
+            const cur = m.get(briefId);
+            if (!cur) return m;
             const next: Brief = {
-              ...brief,
-              hooks: brief.hooks.map((h) =>
+              ...cur,
+              hooks: cur.hooks.map((h) =>
                 h.id === hookId ? { ...h, cutVoUrl: e.url } : h,
               ),
             };
             const saved = upsertBrief(next);
-            setBriefs((m) => {
-              const nm = new Map(m);
-              nm.set(briefId, saved);
-              return nm;
-            });
-          }
+            const nm = new Map(m);
+            nm.set(briefId, saved);
+            return nm;
+          });
           setVoState((s) => {
             const nm = new Map(s);
             nm.set(e.id, { status: "done", url: e.url });

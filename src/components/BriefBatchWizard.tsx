@@ -37,6 +37,7 @@ import {
   RefreshCw,
   Scissors,
   Sparkles,
+  Square,
   Upload,
   Users,
   Video,
@@ -208,6 +209,9 @@ export function BriefBatchWizard() {
   const [voModelId, setVoModelId] = useState<string>(VO_MODEL_DEFAULT);
   const [voState, setVoState] = useState<Map<string, VoCellState>>(new Map());
   const voAbortRef = useRef<AbortController | null>(null);
+  // Per-row abort controllers so a single stuck generation can be stopped
+  // and restarted without touching the others.
+  const voRowAbortRef = useRef<Map<string, AbortController>>(new Map());
 
   // Lipsync state
   const [lipsyncState, setLipsyncState] = useState<Map<string, LsCellState>>(new Map());
@@ -556,6 +560,20 @@ export function BriefBatchWizard() {
     });
   }, []);
 
+  // Stop a single in-flight generation (per row). Aborts its request and
+  // resets it to idle so the user can immediately relaunch it.
+  const stopVo = useCallback((briefId: string, hookId: string) => {
+    const id = `${briefId}:${hookId}`;
+    const ac = voRowAbortRef.current.get(id);
+    ac?.abort();
+    voRowAbortRef.current.delete(id);
+    setVoState((s) => {
+      const nm = new Map(s);
+      if (nm.get(id)?.status === "running") nm.set(id, { status: "idle" });
+      return nm;
+    });
+  }, []);
+
   const regenerateVo = useCallback(
     async (briefId: string, hookId: string) => {
       const brief = briefs.get(briefId);
@@ -564,6 +582,15 @@ export function BriefBatchWizard() {
       if (!hook || !hook.hookScript.trim() || !voiceId) return;
       const voiceName = voices.find((v) => v.voiceId === voiceId)?.name;
       const id = `${briefId}:${hookId}`;
+
+      // Abort any previous attempt for this row, then register a fresh
+      // controller with a hard timeout so a stuck request can never hang
+      // forever (the ~20min freeze the user hit).
+      voRowAbortRef.current.get(id)?.abort();
+      const ac = new AbortController();
+      voRowAbortRef.current.set(id, ac);
+      const timeout = setTimeout(() => ac.abort(), 120_000);
+
       setVoState((s) => {
         const nm = new Map(s);
         nm.set(id, { status: "running" });
@@ -579,6 +606,7 @@ export function BriefBatchWizard() {
             text: hook.hookScript.trim(),
             modelId: voModelId,
           }),
+          signal: ac.signal,
         });
         const data = (await r.json()) as { url?: string; error?: string };
         if (!r.ok || !data.url) {
@@ -607,14 +635,30 @@ export function BriefBatchWizard() {
           return nm;
         });
       } catch (e) {
+        // A manual stop (stopVo) already reset the row to idle — don't
+        // overwrite that with an error.
+        if (ac.signal.aborted && voState.get(id)?.status !== "running") return;
+        const aborted = e instanceof Error && e.name === "AbortError";
         setVoState((s) => {
           const nm = new Map(s);
-          nm.set(id, { status: "error", error: e instanceof Error ? e.message : String(e) });
+          const cur = nm.get(id);
+          if (aborted && cur?.status !== "running") return nm;
+          nm.set(id, {
+            status: "error",
+            error: aborted
+              ? "Génération trop longue (>2min) — arrêtée. Relance."
+              : e instanceof Error
+                ? e.message
+                : String(e),
+          });
           return nm;
         });
+      } finally {
+        clearTimeout(timeout);
+        if (voRowAbortRef.current.get(id) === ac) voRowAbortRef.current.delete(id);
       }
     },
-    [briefs, voiceId, voices, voModelId],
+    [briefs, voiceId, voices, voModelId, voState],
   );
 
   // Cut-blanks handoff. Stores the audio URL + sets attach target then
@@ -1199,6 +1243,7 @@ export function BriefBatchWizard() {
             onRunAll={runBatchVo}
             onCancel={cancelBatchVo}
             onRegenerate={regenerateVo}
+            onStop={stopVo}
             onCutBlanks={handoffCut}
             pendingCount={voJobs.length}
           />
@@ -1866,6 +1911,7 @@ function Step4Voiceover({
   onRunAll,
   onCancel,
   onRegenerate,
+  onStop,
   onCutBlanks,
   pendingCount,
 }: {
@@ -1879,6 +1925,7 @@ function Step4Voiceover({
   onRunAll: () => void;
   onCancel: () => void;
   onRegenerate: (briefId: string, hookId: string) => void;
+  onStop: (briefId: string, hookId: string) => void;
   onCutBlanks: (briefId: string, hookId: string, audioUrl: string) => void;
   pendingCount: number;
 }) {
@@ -2048,19 +2095,26 @@ function Step4Voiceover({
                         <div className="flex items-center justify-between gap-3 flex-wrap">
                           <StatusBadge status={status} error={s?.error} />
                           <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => onRegenerate(b.id, h.id)}
-                              disabled={status === "running"}
-                              className="inline-flex items-center gap-1.5 text-sm text-pf-dim hover:text-pf-accent border border-pf-border hover:border-pf-accent rounded-lg px-3 py-1.5 disabled:opacity-40 transition-colors"
-                            >
-                              {status === "running" ? (
-                                <Loader2 size={13} className="animate-spin" />
-                              ) : (
+                            {status === "running" ? (
+                              <button
+                                type="button"
+                                onClick={() => onStop(b.id, h.id)}
+                                className="inline-flex items-center gap-1.5 text-sm text-pf-danger hover:text-pf-danger border border-pf-border hover:border-pf-danger rounded-lg px-3 py-1.5 transition-colors"
+                                title="Arrêter cette génération (elle est trop longue) puis relancer"
+                              >
+                                <Square size={12} className="fill-current" />
+                                Arrêter
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => onRegenerate(b.id, h.id)}
+                                className="inline-flex items-center gap-1.5 text-sm text-pf-dim hover:text-pf-accent border border-pf-border hover:border-pf-accent rounded-lg px-3 py-1.5 transition-colors"
+                              >
                                 <RefreshCw size={13} />
-                              )}
-                              {url ? "Re-gen" : "Gen"}
-                            </button>
+                                {url ? "Re-gen" : "Gen"}
+                              </button>
+                            )}
                             {url && (
                               <button
                                 type="button"

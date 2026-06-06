@@ -334,6 +334,38 @@ export function BriefBatchWizard() {
     };
   }, []);
 
+  // ----- Backfill cutVoUrl from voState (self-heal) -----
+  // A past concurrency bug could clobber hook.cutVoUrl for every hook of
+  // a brief except the last one to finish — even though voState still
+  // holds each hook's generated URL. Whenever voState has a "done" URL
+  // for a hook that is missing its cutVoUrl, write it back (and persist).
+  // Guarded by an actual diff so it never loops.
+  useEffect(() => {
+    if (voState.size === 0) return;
+    setBriefs((prev) => {
+      let changed = false;
+      const nm = new Map(prev);
+      for (const [id, brief] of prev) {
+        let touched = false;
+        const hooks = brief.hooks.map((h) => {
+          if (h.cutVoUrl) return h;
+          const s = voState.get(`${id}:${h.id}`);
+          if (s?.status === "done" && s.url) {
+            touched = true;
+            return { ...h, cutVoUrl: s.url };
+          }
+          return h;
+        });
+        if (touched) {
+          const saved = upsertBrief({ ...brief, hooks });
+          nm.set(id, saved);
+          changed = true;
+        }
+      }
+      return changed ? nm : prev;
+    });
+  }, [voState]);
+
   // ----- Fetch voices once -----
   useEffect(() => {
     void (async () => {

@@ -112,6 +112,17 @@ const FAVORITE_VOICE_IDS = [
   "G0yjIg3xY8gEJZkHpjVm",
 ] as const;
 
+// ElevenLabs model choices surfaced in the Step 4 control bar. "V2.5" is
+// the model we've always generated with (eleven_multilingual_v2) — kept as
+// the default so nothing changes for existing batches. "V3" is the new
+// eleven_v3 model; our TTS client already drops previous_text/next_text for
+// it (V3 rejects those), so it works through the same generate route.
+const VO_MODEL_OPTIONS = [
+  { id: "eleven_multilingual_v2", label: "V2.5" },
+  { id: "eleven_v3", label: "V3" },
+] as const;
+const VO_MODEL_DEFAULT = "eleven_v3";
+
 // v1 → v2 migration was triggered by inserting the new "Avatars" step
 // at position 2, which shifts every later step by +1 (Scripts 2→3,
 // Voix off 3→4, Images 4→5, Lipsync 5→6, Sync 6→7). We bump the key
@@ -191,6 +202,10 @@ export function BriefBatchWizard() {
   // VO state
   const [voices, setVoices] = useState<Voice[]>([]);
   const [voiceId, setVoiceId] = useState<string>("");
+  // ElevenLabs model used for the whole batch. Defaults to the model we've
+  // always used ("V2.5") so existing behaviour is unchanged; the user can
+  // switch to "V3" from the Step 4 control bar.
+  const [voModelId, setVoModelId] = useState<string>(VO_MODEL_DEFAULT);
   const [voState, setVoState] = useState<Map<string, VoCellState>>(new Map());
   const voAbortRef = useRef<AbortController | null>(null);
 
@@ -466,11 +481,12 @@ export function BriefBatchWizard() {
           voiceId,
           voiceName,
           text: h.hookScript.trim(),
+          modelId: voModelId,
         });
       }
     }
     return jobs;
-  }, [briefs, rows, voState, voiceId, voices]);
+  }, [briefs, rows, voState, voiceId, voices, voModelId]);
 
   const runBatchVo = useCallback(async () => {
     if (voJobs.length === 0) return;
@@ -561,7 +577,7 @@ export function BriefBatchWizard() {
             voiceId,
             voiceName,
             text: hook.hookScript.trim(),
-            modelId: "eleven_multilingual_v2",
+            modelId: voModelId,
           }),
         });
         const data = (await r.json()) as { url?: string; error?: string };
@@ -598,7 +614,7 @@ export function BriefBatchWizard() {
         });
       }
     },
-    [briefs, voiceId, voices],
+    [briefs, voiceId, voices, voModelId],
   );
 
   // Cut-blanks handoff. Stores the audio URL + sets attach target then
@@ -1177,6 +1193,8 @@ export function BriefBatchWizard() {
             voices={voices}
             voiceId={voiceId}
             onVoiceChange={setVoiceId}
+            modelId={voModelId}
+            onModelChange={setVoModelId}
             voState={voState}
             onRunAll={runBatchVo}
             onCancel={cancelBatchVo}
@@ -1842,6 +1860,8 @@ function Step4Voiceover({
   voices,
   voiceId,
   onVoiceChange,
+  modelId,
+  onModelChange,
   voState,
   onRunAll,
   onCancel,
@@ -1853,6 +1873,8 @@ function Step4Voiceover({
   voices: Voice[];
   voiceId: string;
   onVoiceChange: (id: string) => void;
+  modelId: string;
+  onModelChange: (id: string) => void;
   voState: Map<string, VoCellState>;
   onRunAll: () => void;
   onCancel: () => void;
@@ -1905,6 +1927,32 @@ function Step4Voiceover({
               </option>
             ))}
           </select>
+        </div>
+
+        {/* Model version selector — V2.5 (current) / V3 */}
+        <div className="flex items-center gap-1 bg-pf-bg border border-pf-border rounded-lg p-1">
+          {VO_MODEL_OPTIONS.map((m) => {
+            const active = modelId === m.id;
+            return (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => onModelChange(m.id)}
+                className={`px-3 py-1.5 rounded-md text-sm font-bold transition-colors ${
+                  active
+                    ? "bg-pf-accent text-pf-accent-fg"
+                    : "text-pf-dim hover:text-pf-text"
+                }`}
+                title={
+                  m.id === "eleven_v3"
+                    ? "ElevenLabs V3 (eleven_v3) — voix plus expressive"
+                    : "ElevenLabs V2.5 — modèle actuel, stable"
+                }
+              >
+                {m.label}
+              </button>
+            );
+          })}
         </div>
 
         <div className="flex items-center gap-2 text-sm">

@@ -286,13 +286,18 @@ function parseAdBlock(
     for (const rawLine of segment.split(/\n/)) {
       const trimmed = rawLine.trim();
       if (!trimmed) continue;
-      if (trimmed.startsWith(">")) {
-        const clean = trimmed.replace(/^>+\s*/, "").trim();
+      // Strip any leading quote characters before testing for a marker —
+      // users often wrap the whole line in quotes (e.g. `"@…"` or `"> …"`)
+      // out of habit, which used to hide the marker and leak the
+      // directive into the spoken hook line.
+      const unquoted = stripLeadingQuotes(trimmed);
+      if (unquoted.startsWith(">")) {
+        const clean = stripQuotes(unquoted.replace(/^>+\s*/, ""));
         if (clean) notesByIdx[hookIdx].push(clean);
         continue;
       }
-      if (trimmed.startsWith("@")) {
-        const clean = trimmed.replace(/^@+\s*/, "").trim();
+      if (unquoted.startsWith("@")) {
+        const clean = stripQuotes(unquoted.replace(/^@+\s*/, ""));
         if (clean) aiInstrByIdx[hookIdx].push(clean);
         continue;
       }
@@ -364,9 +369,9 @@ function extractMonteurNotes(text: string): { spoken: string; notes: string[] } 
   const spokenLines: string[] = [];
   const notes: string[] = [];
   for (const raw of lines) {
-    const trimmed = raw.trim();
+    const trimmed = stripLeadingQuotes(raw.trim());
     if (trimmed.startsWith(">")) {
-      const clean = trimmed.replace(/^>+\s*/, "").trim();
+      const clean = stripQuotes(trimmed.replace(/^>+\s*/, ""));
       if (clean) notes.push(clean);
       continue;
     }
@@ -385,9 +390,9 @@ function extractAiInstructions(text: string): { spoken: string; instructions: st
   const spokenLines: string[] = [];
   const instructions: string[] = [];
   for (const raw of lines) {
-    const trimmed = raw.trim();
+    const trimmed = stripLeadingQuotes(raw.trim());
     if (trimmed.startsWith("@")) {
-      const clean = trimmed.replace(/^@+\s*/, "").trim();
+      const clean = stripQuotes(trimmed.replace(/^@+\s*/, ""));
       if (clean) instructions.push(clean);
       continue;
     }
@@ -482,15 +487,23 @@ function isTemplatePlaceholder(raw: string): boolean {
   const trimmed = raw.trim();
   if (!trimmed) return true;
   // Strip out everything that looks like a [bracket placeholder] —
-  // including with whitespace inside. If what's left has no actual
-  // content (just commas, slashes, labels, etc.), it's a template.
-  const withoutBrackets = trimmed.replace(/\[[^\]]*\]/g, "").trim();
-  if (!withoutBrackets) return true;
-  // After stripping brackets, what remains should contain at least one
-  // digit OR a real word (not just labels like "V1=" or punctuation).
-  // We consider it a placeholder if there are no digits AND no
-  // lowercase letters (labels like "V1=" are uppercase-only).
-  if (!/\d/.test(withoutBrackets) && !/[a-z]/.test(withoutBrackets)) {
+  // including with whitespace inside (e.g. "[ ]", "[0]", "[Title]").
+  let rest = trimmed.replace(/\[[^\]]*\]/g, "");
+  // Also strip the STRUCTURAL labels (V1, H2, Hook 3, …) and their
+  // separators. Without this, the digits inside the labels themselves
+  // ("V1", "H2", "H3") fool the digit check below into thinking the
+  // line carries real values — which is exactly what made
+  // "V1=[0], H2=[0], H3=[0]" get flagged as unreadable instead of
+  // being treated as an unfilled template line.
+  rest = rest
+    .replace(/\b(?:Hook\s*\d+|V\s*\d+|H\d+)\b/gi, "")
+    .replace(/[:=,/\s]/g, "")
+    .trim();
+  if (!rest) return true;
+  // After stripping brackets + labels, what remains should contain at
+  // least one digit OR a real word. If there are no digits AND no
+  // lowercase letters, it's just leftover punctuation → a template.
+  if (!/\d/.test(rest) && !/[a-z]/.test(rest)) {
     return true;
   }
   return false;
@@ -553,6 +566,13 @@ function stripQuotes(s: string): string {
   // Curly + straight + French + guillemets.
   const cleaned = s.replace(/^[\s"'`«“”‘’]+|[\s"'`»“”‘’]+$/g, "");
   return cleaned;
+}
+
+// Strip only LEADING quote/whitespace characters — used before testing a
+// line for a `>`/`@` marker so a quote the user wrapped around the whole
+// line doesn't hide the marker.
+function stripLeadingQuotes(s: string): string {
+  return s.replace(/^[\s"'`«“”‘’]+/, "");
 }
 
 // ---------------------------------------------------------------------------

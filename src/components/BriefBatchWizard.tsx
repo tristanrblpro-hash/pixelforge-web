@@ -61,6 +61,7 @@ import { runVoiceoverBatch, type VoBatchJob } from "@/lib/voiceoverBatch";
 import { uploadFileToStorage } from "@/lib/uploadFile";
 import { GdocImportModal } from "@/components/GdocImportModal";
 import { UploadAndAttachButton } from "@/components/AttachToBriefButton";
+import VoSegmentPicker from "@/components/VoSegmentPicker";
 
 // ---------------------------------------------------------------------------
 // Local types
@@ -850,6 +851,47 @@ export function BriefBatchWizard() {
     [briefs],
   );
 
+  // --- V1 segment picker (cut/stitch the full voice-off for lipsync) -------
+  // Holds which avatar slot triggered the picker + the source V1 audio URL.
+  const [v1Picker, setV1Picker] = useState<{
+    briefId: string;
+    hookId: string;
+    avatarId: string;
+    url: string;
+  } | null>(null);
+
+  const openV1Picker = useCallback(
+    (briefId: string, hookId: string, avatarId: string) => {
+      const brief = briefs.get(briefId);
+      const v1Url = brief?.hooks.find((h) => h.index === 1)?.cutVoUrl;
+      if (!v1Url) return;
+      setV1Picker({ briefId, hookId, avatarId, url: v1Url });
+    },
+    [briefs],
+  );
+
+  // Receives the stitched WAV from the picker, uploads it, and attaches it
+  // as the avatar's voice clip (same target as "VO du hook" / upload).
+  const applyV1Segment = useCallback(
+    async (file: File) => {
+      if (!v1Picker) return;
+      const { briefId, hookId, avatarId } = v1Picker;
+      const url = await uploadFileToStorage(file);
+      const updated = applyAttach(
+        { kind: "avatarClip", briefId, hookId, avatarId },
+        { url, text: "Montage V1" },
+      );
+      if (updated) {
+        setBriefs((m) => {
+          const nm = new Map(m);
+          nm.set(briefId, updated);
+          return nm;
+        });
+      }
+    },
+    [v1Picker],
+  );
+
   // -----------------------------------------------------------------------
   // Step 6 — Lipsync batch
   // -----------------------------------------------------------------------
@@ -1258,6 +1300,7 @@ export function BriefBatchWizard() {
             onUploadVoToAvatar={uploadVoToAvatar}
             onClearAvatarVo={clearAvatarVo}
             onUseHookVoForOneAvatar={useHookVoForOneAvatar}
+            onPickFromV1={openV1Picker}
           />
         )}
         {step === 6 && (
@@ -1290,6 +1333,14 @@ export function BriefBatchWizard() {
         <GdocImportModal
           onClose={() => setGdocOpen(false)}
           onImported={onGdocImported}
+        />
+      )}
+
+      {v1Picker && (
+        <VoSegmentPicker
+          audioUrl={v1Picker.url}
+          onValidate={applyV1Segment}
+          onClose={() => setV1Picker(null)}
         />
       )}
 
@@ -2160,6 +2211,7 @@ type AvatarRowHandlers = {
   onUploadVoToAvatar: (briefId: string, hookId: string, avatarId: string, file: File) => Promise<void>;
   onClearAvatarVo: (briefId: string, hookId: string, avatarId: string) => void;
   onUseHookVoForOneAvatar: (briefId: string, hookId: string, avatarId: string) => void;
+  onPickFromV1: (briefId: string, hookId: string, avatarId: string) => void;
 };
 
 function Step5Images({
@@ -2269,6 +2321,9 @@ function BriefImageList({
   // Only render hooks that have at least one avatar — empty hooks are
   // a no-op here (their slot count is 0, so nothing to assign).
   const hooksWithAvatars = brief.hooks.filter((h) => h.avatars.length > 0);
+  // The full V1 voice-off (hook index 1) is the source the segment picker
+  // scrubs. Available to every avatar in this brief, not just hook 1.
+  const v1HasVo = !!brief.hooks.find((h) => h.index === 1)?.cutVoUrl;
 
   return (
     <div
@@ -2328,6 +2383,7 @@ function BriefImageList({
             key={h.id}
             briefId={brief.id}
             hook={h}
+            v1HasVo={v1HasVo}
             {...handlers}
           />
         ))}
@@ -2339,10 +2395,12 @@ function BriefImageList({
 function HookAvatarGroup({
   briefId,
   hook,
+  v1HasVo,
   ...handlers
 }: {
   briefId: string;
   hook: HookBrief;
+  v1HasVo: boolean;
 } & AvatarRowHandlers) {
   const label = hook.index === 1 ? "V1 — Original" : `Hook ${hook.index}`;
   const imagesFilled = hook.avatars.filter((a) => a.imageUrl).length;
@@ -2367,6 +2425,7 @@ function HookAvatarGroup({
             briefId={briefId}
             hookId={hook.id}
             hookHasVo={!!hook.cutVoUrl}
+            v1HasVo={v1HasVo}
             avatar={av}
             avatarIdx={idx}
             {...handlers}
@@ -2381,6 +2440,7 @@ function AvatarSlotRow({
   briefId,
   hookId,
   hookHasVo,
+  v1HasVo,
   avatar,
   avatarIdx,
   onUploadImageToAvatar,
@@ -2388,10 +2448,12 @@ function AvatarSlotRow({
   onUploadVoToAvatar,
   onClearAvatarVo,
   onUseHookVoForOneAvatar,
+  onPickFromV1,
 }: {
   briefId: string;
   hookId: string;
   hookHasVo: boolean;
+  v1HasVo: boolean;
   avatar: AvatarSlot;
   avatarIdx: number;
 } & AvatarRowHandlers) {
@@ -2455,21 +2517,34 @@ function AvatarSlotRow({
         onUpload={async (file) => onUploadVoToAvatar(briefId, hookId, avatar.id, file)}
         onClear={() => onClearAvatarVo(briefId, hookId, avatar.id)}
         leftAction={
-          hookHasVo ? (
-            <button
-              type="button"
-              onClick={() => onUseHookVoForOneAvatar(briefId, hookId, avatar.id)}
-              className="inline-flex items-center gap-1.5 text-xs font-semibold bg-pf-soft border border-pf-border hover:border-pf-accent text-pf-text rounded-md px-2.5 py-1.5 transition-colors"
-              title={
-                hasVo
-                  ? "Remplacer la VO actuelle par celle du hook"
-                  : "Copier la voix off du hook (cutVoUrl) dans ce slot"
-              }
-            >
-              <Mic size={12} />
-              VO du hook
-            </button>
-          ) : null
+          <>
+            {hookHasVo && (
+              <button
+                type="button"
+                onClick={() => onUseHookVoForOneAvatar(briefId, hookId, avatar.id)}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold bg-pf-soft border border-pf-border hover:border-pf-accent text-pf-text rounded-md px-2.5 py-1.5 transition-colors"
+                title={
+                  hasVo
+                    ? "Remplacer la VO actuelle par celle du hook"
+                    : "Copier la voix off du hook (cutVoUrl) dans ce slot"
+                }
+              >
+                <Mic size={12} />
+                VO du hook
+              </button>
+            )}
+            {v1HasVo && (
+              <button
+                type="button"
+                onClick={() => onPickFromV1(briefId, hookId, avatar.id)}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold bg-pf-accent/15 border border-pf-accent/40 text-pf-accent hover:bg-pf-accent/25 rounded-md px-2.5 py-1.5 transition-colors"
+                title="Ouvrir la voix off complète (V1) et sélectionner précisément le ou les passages à monter pour le lipsync"
+              >
+                <Scissors size={12} />
+                Découper la V1
+              </button>
+            )}
+          </>
         }
       />
     </div>

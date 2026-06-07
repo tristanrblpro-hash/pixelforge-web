@@ -366,6 +366,48 @@ export function BriefBatchWizard() {
     });
   }, [voState]);
 
+  // ----- Backfill lipsync status/url from lipsyncState (self-heal) -----
+  // Same defense as cutVoUrl above: if a poll reported a lipsync "done"
+  // into lipsyncState but the brief's avatar never picked up
+  // lipsyncStatus/lipsyncVideoUrl (stale closure, page reload mid-poll,
+  // etc.), the "Générer" button would stay AND the Notion sync would skip
+  // the video (sync requires lipsyncStatus === "done"). Whenever
+  // lipsyncState holds a "done" URL for an avatar still missing it, write
+  // it back and persist. Guarded by a real diff so it never loops.
+  useEffect(() => {
+    if (lipsyncState.size === 0) return;
+    setBriefs((prev) => {
+      let changed = false;
+      const nm = new Map(prev);
+      for (const [id, brief] of prev) {
+        let touched = false;
+        const hooks = brief.hooks.map((h) => {
+          let hookTouched = false;
+          const avatars = h.avatars.map((a) => {
+            if (a.lipsyncStatus === "done" && a.lipsyncVideoUrl) return a;
+            const s = lipsyncState.get(`${id}:${h.id}:${a.id}`);
+            if (s?.status === "done" && s.url) {
+              hookTouched = true;
+              return { ...a, lipsyncStatus: "done" as const, lipsyncVideoUrl: s.url };
+            }
+            return a;
+          });
+          if (hookTouched) {
+            touched = true;
+            return { ...h, avatars };
+          }
+          return h;
+        });
+        if (touched) {
+          const saved = upsertBrief({ ...brief, hooks });
+          nm.set(id, saved);
+          changed = true;
+        }
+      }
+      return changed ? nm : prev;
+    });
+  }, [lipsyncState]);
+
   // ----- Fetch voices once -----
   useEffect(() => {
     void (async () => {
@@ -1000,11 +1042,21 @@ export function BriefBatchWizard() {
             const item = data.items?.[0];
             if (!item) return;
             if (item.status === "done" && item.output_url) {
-              const brief = briefs.get(briefId);
-              if (brief) {
+              const outUrl = item.output_url;
+              // Read the CURRENT brief inside the functional updater rather
+              // than from the closure: this poll has been running for
+              // minutes, so `briefs` captured at startLsPolling time is
+              // stale. Using it would either no-op (brief missing) or
+              // clobber sibling updates — leaving the avatar's
+              // lipsyncStatus unset so the "Générer" button never clears
+              // and Notion skips the video. Functional update = always
+              // latest.
+              setBriefs((m) => {
+                const cur = m.get(briefId);
+                if (!cur) return m;
                 const next: Brief = {
-                  ...brief,
-                  hooks: brief.hooks.map((h) =>
+                  ...cur,
+                  hooks: cur.hooks.map((h) =>
                     h.id === hookId
                       ? {
                           ...h,
@@ -1013,7 +1065,7 @@ export function BriefBatchWizard() {
                               ? {
                                   ...a,
                                   lipsyncStatus: "done",
-                                  lipsyncVideoUrl: item.output_url || undefined,
+                                  lipsyncVideoUrl: outUrl,
                                 }
                               : a,
                           ),
@@ -1022,15 +1074,13 @@ export function BriefBatchWizard() {
                   ),
                 };
                 const saved = upsertBrief(next);
-                setBriefs((m) => {
-                  const nm = new Map(m);
-                  nm.set(briefId, saved);
-                  return nm;
-                });
-              }
+                const nm = new Map(m);
+                nm.set(briefId, saved);
+                return nm;
+              });
               setLipsyncState((s) => {
                 const nm = new Map(s);
-                nm.set(id, { status: "done", url: item.output_url || undefined });
+                nm.set(id, { status: "done", url: outUrl });
                 return nm;
               });
               finish();
@@ -1051,7 +1101,7 @@ export function BriefBatchWizard() {
         void poll();
       });
     },
-    [briefs, stopLsPolling],
+    [stopLsPolling],
   );
 
   const runOneLipsync = useCallback(
